@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,7 +59,7 @@ func TestListPaginatesWithoutLosingIDs(t *testing.T) {
 func TestAuthExpired(t *testing.T) {
 	c := clientFixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) })
 	_, err := c.List(context.Background(), "0")
-	if err != ErrAuth {
+	if !errors.Is(err, ErrAuth) {
 		t.Fatalf("want ErrAuth, got %v", err)
 	}
 }

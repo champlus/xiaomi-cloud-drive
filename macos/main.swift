@@ -26,7 +26,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var importingSession = false
     var connected = false
     var serviceReadyAttempts = 0
-    var refreshTick = 0
+    lazy var webSession = WebSessionStore()
+    var refreshPolicy = LoginRefreshPolicy()
+    var loginTimeout: DispatchWorkItem?
+    var serverRenewalRequested = false
+    var restoredServiceSession = false
+    var syncingServiceCookies = false
+    var savedSessionVersion: UInt64?
     var mountedPath: String?
     var background: Bool { CommandLine.arguments.contains("--background") }
     var startupURL: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/\(launchLabel).plist") }
@@ -42,6 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         buildMenu()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(woke), name: NSWorkspace.didWakeNotification, object: nil)
         do { try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]); try startService(); if !UserDefaults.standard.bool(forKey: "hasChosenStartup") { try setStartup(true) } } catch { showError(error.localizedDescription) }
+        webSession.onError = { [weak self] message in self?.model.error = message }
+        webSession.restore { [weak self] in self?.heartbeat() }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.heartbeat() }
     }
     func configureMainMenu() {
@@ -72,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     func startService() throws {
         let process = Process(); process.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/midrive-service")
-        process.arguments = ["--data-dir", support.path]
+        process.arguments = ["--data-dir", support.path, "--native-session"]
         let logURL = support.appendingPathComponent("service.log")
         if let size = try? logURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 1_000_000 { try? FileManager.default.removeItem(at: logURL) }
         FileManager.default.createFile(atPath: logURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
@@ -93,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         URLSession.shared.dataTask(with: req) { data, response, error in DispatchQueue.main.async {
             if let error = error { completion(.failure(error)); return }
             guard let response = response as? HTTPURLResponse, let data = data else { completion(.failure(self.problem("本地服务未响应"))); return }
-            if response.statusCode != 200 { completion(.failure(self.problem(String(data: data, encoding: .utf8) ?? "操作失败"))); return }
+            if response.statusCode != 200 { completion(.failure(NSError(domain: "米盘", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "操作失败"]))); return }
             completion(.success((try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]))
         } }.resume()
     }
@@ -105,11 +113,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.autoMount = (state["config"] as? [String: Any])?["autoMount"] as? Bool ?? true
             self.buildMenu()
             if self.connected && self.autoMount && !self.isMounted() && Date() > self.nextMountAttempt { self.mount(open: false) { _ in } }
-            self.refreshTick += 1
-            if self.refreshTick % 120 == 0 || (!self.connected && self.refreshTick % 20 == 1) { self.refreshLogin() }
+            let renewing = state["renewing"] as? Bool ?? false
+            if renewing && !self.serverRenewalRequested { self.refreshPolicy.request(); self.serverRenewalRequested = true }
+            if !renewing { self.serverRenewalRequested = false }
+            if self.refreshPolicy.expired(), let web = self.loginWeb, self.loginWindow == nil { self.finishLoginRefresh(web, result: .transientFailure) }
+            if !self.webSession.needsAuthorization {
+                if state["hasSession"] as? Bool != true, self.webSession.hasCredentials, !self.restoredServiceSession { self.restoreServiceSession() }
+                if self.connected && !renewing { self.persistServiceSession(state) }
+                if state["hasSession"] as? Bool == true || renewing { self.refreshLogin() }
+            }
         } }
     }
-    @objc func woke() { nextMountAttempt = Date().addingTimeInterval(5); DispatchQueue.main.asyncAfter(deadline: .now()+6) { self.request("check", body: [:]) { _ in }; self.heartbeat() } }
+    @objc func woke() { refreshPolicy.request(); nextMountAttempt = Date().addingTimeInterval(5); DispatchQueue.main.asyncAfter(deadline: .now()+6) { self.request("check", body: [:]) { _ in }; self.heartbeat() } }
     func isMounted() -> Bool {
         var pointer: UnsafeMutablePointer<statfs>?; let count = getmntinfo(&pointer, MNT_NOWAIT)
         guard let first = pointer, count > 0 else { return false }
@@ -154,38 +169,147 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let hosting = NSHostingView(rootView: SettingsView(model: model)); window.contentView = hosting
         settingsWindow = window; window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
-    func openLogin() {
-        if let window = loginWindow { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let web = WKWebView(frame: .zero, configuration: WKWebViewConfiguration()); web.navigationDelegate = self; web.uiDelegate = self
-        web.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 670), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "登录小米账号 · i.mi.com"; window.center(); window.isReleasedWhenClosed = false; window.contentView = web; window.delegate = self
-        loginWeb = web; loginWindow = window; web.load(URLRequest(url: URL(string: "https://i.mi.com/drive/h5")!)); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    func authorizeKeychain(completion: @escaping (String?) -> Void) {
+        webSession.authorize { error in
+            if error == nil { self.restoredServiceSession = false; self.savedSessionVersion = nil; self.heartbeat() }
+            completion(error)
+        }
     }
-    func refreshLogin() { guard loginWeb == nil else { return }; let web = WKWebView(frame: .zero); web.navigationDelegate = self; loginWeb = web; web.load(URLRequest(url: URL(string: "https://i.mi.com/drive/h5")!)) }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard webView === loginWeb, webView.url?.host == "i.mi.com", !importingSession else { return }
-        importingSession = true
-        webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
-            let names: Set<String> = ["serviceToken", "userId", "i.mi.com_ph", "i.mi.com_slh", "i.mi.com_isvalid_servicetoken", "i.mi.com_istrudev", "deviceId", "uLocale"]
-            let selected = cookies.filter { names.contains($0.name) && ["mi.com", "i.mi.com"].contains($0.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))) }
-            guard selected.contains(where: { $0.name == "serviceToken" }) else { self.importingSession = false; return }
-            let values: [[String: Any]] = selected.map { ["Name": $0.name, "Value": $0.value, "Domain": $0.domain, "Path": "/", "Secure": true] }
-            self.request("session", body: ["cookies": values]) { result in
-                self.importingSession = false
-                if case .success = result { self.connected = true; self.loginWindow?.close(); self.loginWindow = nil; self.loginWeb = nil; self.nextMountAttempt = .distantPast; self.heartbeat(); self.model.refresh() }
+    func restoreServiceSession() {
+        guard webSession.ready, !webSession.needsAuthorization, loginWeb == nil else { return }
+        restoredServiceSession = true
+        webSession.serviceCookies { cookies in
+            guard cookies.contains(where: { $0["Name"] as? String == "serviceToken" }) else { self.refreshPolicy.request(); self.refreshLogin(); return }
+            self.request("session", body: ["cookies": cookies, "background": true]) { result in
+                switch result {
+                case .success: self.heartbeat(); self.model.refresh()
+                case .failure: self.refreshPolicy.request(); self.refreshLogin()
+                }
             }
         }
+    }
+    func persistServiceSession(_ state: [String: Any]) {
+        guard webSession.ready, !webSession.needsAuthorization, !syncingServiceCookies, loginWeb == nil,
+              let version = (state["sessionVersion"] as? NSNumber)?.uint64Value, version != savedSessionVersion else { return }
+        syncingServiceCookies = true
+        request("session/cookies") { result in
+            guard self.loginWeb == nil else { self.syncingServiceCookies = false; return }
+            guard case .success(let snapshot) = result, let values = snapshot["cookies"] as? [[String: Any]] else { self.syncingServiceCookies = false; return }
+            self.webSession.apply(values.compactMap(WebSessionCookie.fromService)) {
+                self.webSession.persist {
+                    self.savedSessionVersion = (snapshot["version"] as? NSNumber)?.uint64Value
+                    self.syncingServiceCookies = false
+                    self.refreshLogin()
+                }
+            }
+        }
+    }
+    func loginWebView() -> WKWebView {
+        let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = webSession.dataStore
+        let web = WKWebView(frame: .zero, configuration: configuration)
+        web.navigationDelegate = self; web.uiDelegate = self
+        web.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15"
+        return web
+    }
+    func openLogin() {
+        guard webSession.ready else { webSession.restore { self.openLogin() }; return }
+        if let window = loginWindow { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        loginTimeout?.cancel(); loginWeb?.stopLoading(); loginWeb = nil; importingSession = false
+        let web = loginWebView()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 670), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = "登录小米账号 · i.mi.com"; window.center(); window.isReleasedWhenClosed = false; window.contentView = web; window.delegate = self
+        loginWeb = web; loginWindow = window
+        web.load(URLRequest(url: URL(string: "https://i.mi.com/drive/h5")!))
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func refreshLogin() {
+        guard webSession.ready, !webSession.needsAuthorization, !syncingServiceCookies, loginWeb == nil, refreshPolicy.begin() else { return }
+        let web = loginWebView(); loginWeb = web
+        let timeout = DispatchWorkItem { [weak self, weak web] in
+            guard let self = self, let web = web, web === self.loginWeb else { return }
+            self.finishLoginRefresh(web, result: .transientFailure)
+        }
+        loginTimeout = timeout; DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: timeout)
+        let load = {
+            guard web === self.loginWeb else { return }
+            web.load(URLRequest(url: URL(string: "https://i.mi.com/drive/h5")!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 40))
+        }
+        // A healthy service may have newer rotated cookies than the last browser
+        // visit. Do not re-import stale browser tokens over an active session.
+        if connected {
+            request("session/cookies") { result in
+                guard web === self.loginWeb else { return }
+                if case .success(let state) = result, let values = state["cookies"] as? [[String: Any]] {
+                    self.webSession.apply(values.compactMap(WebSessionCookie.fromService)) { self.webSession.persist(); load() }
+                } else { load() }
+            }
+        } else { load() }
+    }
+    func finishLoginRefresh(_ web: WKWebView, result: LoginRefreshResult) {
+        guard web === loginWeb else { return }
+        let background = loginWindow == nil
+        loginTimeout?.cancel(); loginTimeout = nil; importingSession = false
+        refreshPolicy.finish(result: result)
+        if result == .connected {
+            webSession.persist(); loginWeb = nil
+            let window = loginWindow; loginWindow = nil; window?.close()
+            connected = true; nextMountAttempt = .distantPast; heartbeat(); model.refresh()
+        } else if background {
+            web.stopLoading(); loginWeb = nil
+            request("session/refresh-failed", body: ["reason": result == .loginRequired ? "login_required" : "network"]) { _ in self.model.refresh() }
+        }
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === loginWeb else { return }
+        let host = webView.url?.host ?? ""
+        if ["account.xiaomi.com", "account.xiaomi.cn"].contains(host), webView.url?.path.contains("/login") == true {
+            if loginWindow == nil { finishLoginRefresh(webView, result: .loginRequired) }; return
+        }
+        guard host == "i.mi.com", webView.url?.path.hasPrefix("/drive") == true, !importingSession else { return }
+        importingSession = true
+        webSession.dataStore.httpCookieStore.getAllCookies { cookies in
+            guard webView === self.loginWeb else { return }
+            let values = cookies.compactMap { WebSessionCookie($0).servicePayload }
+            guard values.contains(where: { $0["Name"] as? String == "serviceToken" }) else {
+                self.importingSession = false
+                if self.loginWindow == nil { self.finishLoginRefresh(webView, result: .loginRequired) }; return
+            }
+            self.request("session", body: ["cookies": values, "background": self.loginWindow == nil]) { result in
+                guard webView === self.loginWeb else { return }
+                self.importingSession = false
+                switch result {
+                case .success: self.finishLoginRefresh(webView, result: .connected)
+                case .failure(let error):
+                    self.model.error = error.localizedDescription
+                    if self.loginWindow == nil, (error as NSError).code != 401 { self.finishLoginRefresh(webView, result: .transientFailure) }
+                    // On a rejected probe, keep the official page alive so its
+                    // account SSO redirect can renew the session. A real login
+                    // form or the deadline, not this early probe, ends renewal.
+                }
+            }
+        }
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code != NSURLErrorCancelled { finishLoginRefresh(webView, result: .transientFailure) }
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code != NSURLErrorCancelled { finishLoginRefresh(webView, result: .transientFailure) }
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }
         let host = url.host ?? ""
-        if url.scheme == "https" && (["mi.com", "xiaomi.com", "mi-img.com", "xiaomi.net"].contains(where: { host == $0 || host.hasSuffix("."+$0) })) { decisionHandler(.allow) }
+        if url.scheme == "https" && (["mi.com", "xiaomi.com", "xiaomi.cn", "mi-img.com", "xiaomi.net"].contains(where: { host == $0 || host.hasSuffix("."+$0) })) { decisionHandler(.allow) }
         else if url.absoluteString == "about:blank" { decisionHandler(.allow) } else { decisionHandler(.cancel) }
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { if webView === loginWeb, action.targetFrame == nil { webView.load(action.request) }; return nil }
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { let alert = NSAlert(); alert.messageText = message; alert.addButton(withTitle: "确认"); alert.addButton(withTitle: "取消"); completionHandler(alert.runModal() == .alertFirstButtonReturn) }
-    func windowWillClose(_ notification: Notification) { if notification.object as? NSWindow === loginWindow { loginWindow = nil; loginWeb = nil } }
+    func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow === loginWindow {
+            loginTimeout?.cancel(); loginTimeout = nil; loginWeb?.stopLoading()
+            loginWindow = nil; loginWeb = nil; importingSession = false
+            refreshPolicy.finish(result: .transientFailure)
+        }
+    }
     func setStartup(_ enabled: Bool) throws {
         let path = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/米盘").path
         if enabled {
@@ -199,12 +323,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     func state() -> [String: Any] { ["startup": startup, "mounted": isMounted()] }
     func notifyState() { model.refresh() }
-    func clearLogin(completion: @escaping () -> Void) {
-        let store = WKWebsiteDataStore.default()
-        store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-            let own = records.filter { $0.displayName.contains("mi.com") || $0.displayName.contains("xiaomi.com") }
-            store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: own, completionHandler: completion)
-        }
+    func clearLogin(completion: @escaping (String?) -> Void) {
+        loginTimeout?.cancel(); loginTimeout = nil; loginWeb?.stopLoading(); loginWeb = nil
+        let window = loginWindow; loginWindow = nil; window?.close()
+        webSession.clear(completion: completion)
     }
     func showError(_ text: String) { let alert = NSAlert(); alert.messageText = "米盘"; alert.informativeText = text; alert.addButton(withTitle: "好"); NSApp.activate(ignoringOtherApps: true); alert.runModal() }
     @objc func quit() {

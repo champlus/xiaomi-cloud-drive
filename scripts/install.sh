@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+TASK_INSTALL_OPEN=true
+if [ "$#" -gt 1 ]; then echo '用法：install.sh [--no-open]' >&2; exit 2; fi
+case "${1-}" in
+  --no-open) TASK_INSTALL_OPEN=false ;;
+  '') ;;
+  *) echo '用法：install.sh [--no-open]' >&2; exit 2 ;;
+esac
 if pgrep -f '/米盘.app/Contents/MacOS/米盘' >/dev/null; then
   echo '请先从菜单栏退出米盘，再运行安装。' >&2
   exit 1
@@ -22,4 +29,4 @@ if [ -d "$TARGET_APP" ]; then mv "$TARGET_APP" "$TASK_INSTALL_TEMP/previous.app"
 mv "$TASK_INSTALL_TEMP/米盘.app" "$TARGET_APP"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$TARGET_APP/Contents/MacOS/mipan" "$HOME/.local/bin/mipan"
-open "$TARGET_APP"
+if [ "$TASK_INSTALL_OPEN" = true ]; then open "$TARGET_APP"; fi

@@ -152,3 +152,29 @@ func TestAuthFailureMarksConnectionExpired(t *testing.T) {
 		t.Fatal("expired session still reported connected")
 	}
 }
+
+func TestNativeSessionSnapshotRequiresLocalAuthentication(t *testing.T) {
+	s := testServer(t)
+	s.Client.SetCookies([]*http.Cookie{{Name: "serviceToken", Value: "synthetic-session-value", Domain: ".i.mi.com", Path: "/"}})
+	for _, authorized := range []bool{false, true} {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:1234/api/session/cookies", nil)
+		if authorized {
+			r.Header.Set("Authorization", "Bearer admin-secret")
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if !authorized && (w.Code != 401 || strings.Contains(w.Body.String(), "synthetic-session-value")) {
+			t.Fatal("session cookies escaped local authorization")
+		}
+		if authorized && (w.Code != 200 || !strings.Contains(w.Body.String(), "synthetic-session-value")) {
+			t.Fatal("native refresher cannot obtain current rotated cloud session")
+		}
+	}
+	r := httptest.NewRequest("GET", "http://127.0.0.1:1234/api/status", nil)
+	r.Header.Set("Authorization", "Bearer admin-secret")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if strings.Contains(w.Body.String(), "synthetic-session-value") {
+		t.Fatal("status leaked cloud session")
+	}
+}

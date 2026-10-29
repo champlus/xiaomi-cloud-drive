@@ -11,6 +11,10 @@ final class SettingsModel: ObservableObject {
     weak var app: AppDelegate?
     @Published var connected = false
     @Published var checking = false
+    @Published var renewing = false
+    @Published var authRequired = false
+    @Published var hasSession = false
+    @Published var keychainRequired = false
     @Published var mounted = false
     @Published var startup = false
     @Published var autoMount = true
@@ -22,7 +26,7 @@ final class SettingsModel: ObservableObject {
     init(app: AppDelegate) { self.app = app }
     func refresh() {
         guard let app = app else { return }
-        mounted = app.isMounted(); startup = app.startup
+        mounted = app.isMounted(); startup = app.startup; keychainRequired = app.webSession.needsAuthorization
         app.request("status") { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -30,6 +34,9 @@ final class SettingsModel: ObservableObject {
             case .success(let state):
                 self.connected = state["connected"] as? Bool ?? false
                 self.checking = state["checking"] as? Bool ?? false
+                self.renewing = state["renewing"] as? Bool ?? false
+                self.authRequired = state["authRequired"] as? Bool ?? false
+                self.hasSession = state["hasSession"] as? Bool ?? false
                 self.error = state["error"] as? String ?? ""
                 self.pending = (state["pending"] as? [[String: Any]])?.count ?? 0
                 let config = state["config"] as? [String: Any] ?? [:]
@@ -49,18 +56,19 @@ final class SettingsModel: ObservableObject {
     func mount() { perform { done in self.app?.mount(open: true, completion: done) } }
     func unmount() { perform { done in self.app?.unmount(completion: done) } }
     func login() { app?.openLogin() }
+    func authorizeKeychain() { perform { done in self.app?.authorizeKeychain(completion: done) } }
     func changeStartup(_ enabled: Bool) { do { try app?.setStartup(enabled); startup = enabled } catch { self.error = error.localizedDescription } }
     func changeConfig(autoMount: Bool? = nil, readOnly: Bool? = nil) {
         perform { done in self.app?.request("config", body: ["autoMount": autoMount ?? self.autoMount, "readOnly": readOnly ?? self.readOnly]) { result in
             switch result { case .failure(let err): done(err.localizedDescription); case .success: self.app?.nextMountAttempt = .distantPast; self.app?.heartbeat(); done(nil) }
         } }
     }
-    func check() { perform { done in self.app?.request("check", body: [:]) { result in if case .failure(let err) = result { done(err.localizedDescription) } else { done(nil) } } } }
+    func check() { app?.refreshPolicy.request(); perform { done in self.app?.request("check", body: [:]) { result in if case .failure(let err) = result { done(err.localizedDescription) } else { done(nil) } } } }
     func logout() { perform { done in self.app?.unmount { error in
         if let error = error { done(error); return }
         self.app?.request("logout", body: [:]) { result in
             if case .failure(let error) = result { done(error.localizedDescription); return }
-            self.app?.clearLogin { done(nil) }
+            self.app?.clearLogin(completion: done)
         }
     } } }
 }
@@ -132,8 +140,8 @@ struct SettingsView: View {
             SettingsCard {
                 SettingsRow(icon: "circle.dotted", title: "连接状态") {
                     HStack(spacing: 6) {
-                        if model.checking || model.busy { ProgressView().controlSize(.mini) }
-                        Text(model.checking ? "连接中" : model.connected ? "已连接" : "未登录")
+                        if model.checking || model.busy || model.renewing { ProgressView().controlSize(.mini) }
+                        Text(model.keychainRequired ? "需要授权" : model.renewing ? "恢复连接中" : model.checking ? "连接中" : model.connected ? "已连接" : model.authRequired ? "需要验证" : model.hasSession ? "连接中断" : "未登录")
                             .font(.system(size: 12)).foregroundStyle(model.connected ? Color.green : Color.secondary)
                         Button(action: model.check) { Image(systemName: "arrow.clockwise") }.buttonStyle(.borderless).help("检查连接")
                     }
@@ -145,7 +153,8 @@ struct SettingsView: View {
                 }
                 CardDivider()
                 SettingsRow(icon: "person.crop.circle", title: "小米账号") {
-                    if model.connected {
+                    if model.keychainRequired { Button("授权钥匙串", action: model.authorizeKeychain).buttonStyle(.borderedProminent) }
+                    else if model.connected {
                         Button("重新登录", action: model.login)
                         Button("退出", action: model.logout)
                     } else { Button("登录", action: model.login).buttonStyle(.borderedProminent) }
@@ -156,7 +165,7 @@ struct SettingsView: View {
                     Button("打开") { NSWorkspace.shared.open(URL(string: "https://i.mi.com/drive/h5")!) }
                 }
             }
-            if !model.error.isEmpty && model.connected { errorRow }
+            if !model.error.isEmpty && !model.renewing && !model.keychainRequired { errorRow }
         }
     }
     private var generalPage: some View {
@@ -199,7 +208,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            if !model.error.isEmpty && model.connected { errorRow }
+            if !model.error.isEmpty && !model.renewing && !model.keychainRequired { errorRow }
         }
     }
     private var errorRow: some View {

@@ -5,3 +5,5 @@
 /runtime.json
 *.test
 /coverage.out
+__pycache__/
+*.pyc

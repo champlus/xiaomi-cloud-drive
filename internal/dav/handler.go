@@ -123,6 +123,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// x/net/webdav can emit a successful root-only response when Readdir fails.
+	// Resolve a depth-one listing before it writes headers so an expired login
+	// is reported as an error instead of appearing to erase the user's drive.
+	if r.Method == "PROPFIND" && r.Header.Get("Depth") == "1" {
+		entry, err := h.FS.Resolve(r.Context(), strings.TrimPrefix(r.URL.Path, prefix))
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		if entry.IsDir() {
+			if _, err = h.FS.List(r.Context(), entry.ID); err != nil {
+				h.fail(w, err)
+				return
+			}
+		}
+	}
 	if r.Method == "GET" || r.Method == "HEAD" {
 		if entry, err := h.FS.Resolve(r.Context(), strings.TrimPrefix(r.URL.Path, prefix)); err == nil && !entry.IsDir() {
 			contentType, _ := (info{entry}).ContentType(r.Context())

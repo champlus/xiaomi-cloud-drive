@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -51,15 +50,18 @@ type Backend interface {
 }
 
 type Client struct {
-	Base    string
-	HTTP    *http.Client
-	Storage *http.Client
-	mu      sync.RWMutex
-	cookies []*http.Cookie
+	Base             string
+	HTTP             *http.Client
+	Storage          *http.Client
+	mu               sync.RWMutex
+	generation       uint64
+	sessionVersion   uint64
+	OnSessionChanged func()
+	RefreshSession   func(context.Context, uint64) error
 }
 
 func New() *Client {
-	jar, _ := cookiejar.New(nil)
+	jar := newSessionJar()
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 8
 	transport.ResponseHeaderTimeout = 45 * time.Second
@@ -82,39 +84,39 @@ func New() *Client {
 	}}}
 }
 func (c *Client) SetCookies(cookies []*http.Cookie) error {
-	var selected []*http.Cookie
-	allowed := map[string]bool{"serviceToken": true, "userId": true, "i.mi.com_ph": true, "i.mi.com_slh": true, "i.mi.com_isvalid_servicetoken": true, "i.mi.com_istrudev": true, "deviceId": true, "uLocale": true}
-	for _, x := range cookies {
-		d := strings.TrimPrefix(x.Domain, ".")
-		if allowed[x.Name] && (d == "mi.com" || d == "i.mi.com" || d == "") {
-			v := *x
-			v.Path = "/"
-			v.Secure = true
-			selected = append(selected, &v)
+	jar := newSessionJar()
+	u, _ := url.Parse(c.Base)
+	selected := []*http.Cookie{}
+	for _, cookie := range cookies {
+		if !allowedCookie(cookie) {
+			continue
+		}
+		copy := *cookie
+		if copy.Path == "" {
+			copy.Path = "/"
+		}
+		copy.Secure = true
+		selected = append(selected, &copy)
+	}
+	jar.SetCookies(u, selected)
+	hasToken := false
+	for _, cookie := range jar.snapshot() {
+		if cookie.Name == "serviceToken" && cookie.Value != "" {
+			hasToken = true
 		}
 	}
-	token := ""
-	for _, x := range selected {
-		if x.Name == "serviceToken" {
-			token = x.Value
-		}
-	}
-	if token == "" {
+	if !hasToken {
 		return ErrAuth
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	jar, _ := cookiejar.New(nil)
-	u, _ := url.Parse(c.Base)
-	jar.SetCookies(u, selected)
 	c.HTTP.Jar = jar
-	c.cookies = selected
+	c.generation++
+	c.sessionVersion++
+	c.mu.Unlock()
 	return nil
 }
 func (c *Client) AccountKey() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, x := range c.cookies {
+	for _, x := range c.Cookies() {
 		if x.Name == "userId" {
 			h := sha256.Sum256([]byte(x.Value))
 			return hex.EncodeToString(h[:16])
@@ -122,59 +124,89 @@ func (c *Client) AccountKey() string {
 	}
 	return "signed-out"
 }
-func (c *Client) HasSession() bool { return c.token() != "" }
+func (c *Client) HasSession() bool {
+	for _, x := range c.Cookies() {
+		if x.Name == "serviceToken" && x.Value != "" {
+			return true
+		}
+	}
+	return false
+}
 func (c *Client) ClearCookies() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	jar, _ := cookiejar.New(nil)
-	c.HTTP.Jar = jar
-	c.cookies = nil
+	c.HTTP.Jar = newSessionJar()
+	c.generation++
+	c.sessionVersion++
 }
 func (c *Client) Cookies() []*http.Cookie {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if jar, ok := c.HTTP.Jar.(*sessionJar); ok {
+		return jar.snapshot()
+	}
 	u, _ := url.Parse(c.Base)
-	current := map[string]string{}
-	for _, cookie := range c.HTTP.Jar.Cookies(u) {
-		current[cookie.Name] = cookie.Value
-	}
-	result := []*http.Cookie{}
-	for _, cookie := range c.cookies {
-		if value, ok := current[cookie.Name]; ok {
-			copy := *cookie
-			copy.Value = value
-			result = append(result, &copy)
-		}
-	}
-	return result
+	return c.HTTP.Jar.Cookies(u)
 }
-func (c *Client) token() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	u, _ := url.Parse(c.Base)
-	for _, x := range c.HTTP.Jar.Cookies(u) {
-		if x.Name == "serviceToken" {
-			return x.Value
-		}
-	}
-	return ""
-}
+func (c *Client) SessionVersion() uint64 { c.mu.RLock(); defer c.mu.RUnlock(); return c.sessionVersion }
+func (c *Client) Generation() uint64     { c.mu.RLock(); defer c.mu.RUnlock(); return c.generation }
 func (c *Client) call(ctx context.Context, method, path string, v url.Values, out any) error {
+	generation := c.Generation()
+	account := c.AccountKey()
+	err := c.callOnce(ctx, method, path, v, out)
+	if !errors.Is(err, ErrAuth) || c.RefreshSession == nil {
+		return err
+	}
+	if refreshErr := c.RefreshSession(ctx, generation); refreshErr != nil {
+		if errors.Is(refreshErr, ErrAuth) {
+			return err
+		}
+		return refreshErr
+	}
+	if c.AccountKey() != account {
+		return errors.New("账号已切换，请重新执行原操作")
+	}
+	return c.callOnce(ctx, method, path, v, out)
+}
+func (c *Client) callOnce(ctx context.Context, method, path string, v url.Values, out any) error {
 	if v == nil {
 		v = url.Values{}
 	}
-	var body io.Reader
 	endpoint := c.Base + "/" + strings.TrimPrefix(path, "/")
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return errors.New("小米接口地址无效")
+	}
+	c.mu.RLock()
+	client := *c.HTTP
+	jar := client.Jar
+	cookies := jar.Cookies(u)
+	generation := c.generation
+	c.mu.RUnlock()
+	// Freeze both the form token and Cookie header from one snapshot. Imports and
+	// parallel responses may rotate the live jar while this request is in flight.
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	var body io.Reader
 	if method == http.MethodGet {
 		v.Set("ts", fmt.Sprint(time.Now().UnixMilli()))
 		endpoint += "?" + v.Encode()
 	} else {
-		v.Set("serviceToken", c.token())
+		v.Del("serviceToken")
+		for _, cookie := range cookies {
+			if cookie.Name == "serviceToken" {
+				v.Set("serviceToken", cookie.Value)
+				break
+			}
+		}
 		body = strings.NewReader(v.Encode())
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return err
+	}
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
 	}
 	req.Header.Set("Referer", c.Base+"/drive/h5")
 	req.Header.Set("Origin", c.Base)
@@ -182,42 +214,104 @@ func (c *Client) call(ctx context.Context, method, path string, v url.Values, ou
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 	}
-	c.mu.RLock()
-	resp, err := c.HTTP.Do(req)
-	c.mu.RUnlock()
+	resp, err := client.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("无法连接小米云盘，请检查网络后重试")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode/100 == 3 {
-		return ErrAuth
+	changed := false
+	c.mu.Lock()
+	if c.generation == generation && len(resp.Cookies()) > 0 {
+		before, _ := json.Marshal(cookiesSnapshot(jar, u))
+		jar.SetCookies(u, resp.Cookies())
+		after, _ := json.Marshal(cookiesSnapshot(jar, u))
+		changed = !bytes.Equal(before, after)
+		if changed {
+			c.sessionVersion++
+		}
 	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("小米服务暂时不可用（HTTP %d）", resp.StatusCode)
+	notify := c.OnSessionChanged
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify()
+	}
+	failure := &ResponseError{HTTPStatus: resp.StatusCode, Endpoint: path}
+	if resp.StatusCode == http.StatusUnauthorized {
+		failure.Auth = true
+		return failure
+	}
+	if resp.StatusCode/100 == 3 {
+		target, _ := url.Parse(resp.Header.Get("Location"))
+		if target != nil {
+			target = u.ResolveReference(target)
+		}
+		if target != nil && (target.Hostname() == "account.xiaomi.com" || target.Hostname() == "account.xiaomi.cn" || (target.Hostname() == "i.mi.com" && strings.HasPrefix(target.Path, "/sts"))) {
+			failure.Auth = true
+		}
+		return failure
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusForbidden {
+		return failure
 	}
 	var result struct {
-		Code        int             `json:"code"`
-		R           int             `json:"R"`
-		Result      string          `json:"result"`
-		Description string          `json:"description"`
-		Data        json.RawMessage `json:"data"`
+		Code   int             `json:"code"`
+		R      int             `json:"R"`
+		Result string          `json:"result"`
+		Data   json.RawMessage `json:"data"`
 	}
 	if err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
-		return errors.New("小米返回了无法识别的响应，请重新登录")
+		return failure
 	}
-	if result.Code == 401 || result.Code == 10006 || result.R == 401 {
-		return ErrAuth
+	failure.Code = result.Code
+	failure.Auth = result.Code == 401 || result.R == 401
+	if failure.Auth || resp.StatusCode != http.StatusOK {
+		return failure
 	}
 	if result.Code == 11010 || result.Code == 11001 {
 		return ErrEncrypted
 	}
 	if result.Code != 0 || result.Result != "ok" {
-		return fmt.Errorf("小米云盘操作失败（代码 %d）：%s", result.Code, result.Description)
+		return failure
 	}
 	if out != nil {
 		return json.Unmarshal(result.Data, out)
 	}
 	return nil
+}
+func cookiesSnapshot(jar http.CookieJar, u *url.URL) []*http.Cookie {
+	if saved, ok := jar.(*sessionJar); ok {
+		return saved.snapshot()
+	}
+	return jar.Cookies(u)
+}
+
+// ResponseError retains only safe diagnostics, never response bodies or URLs
+// containing authentication parameters.
+type ResponseError struct {
+	HTTPStatus int
+	Code       int
+	Endpoint   string
+	Auth       bool
+}
+
+func (e *ResponseError) Is(target error) bool { return e.Auth && target == ErrAuth }
+func (e *ResponseError) Error() string {
+	if e.Auth {
+		return fmt.Sprintf("%s（HTTP %d，代码 %d）", ErrAuth, e.HTTPStatus, e.Code)
+	}
+	if e.Code == 10006 {
+		return "小米云空间已满，请清理空间或扩容后重试"
+	}
+	if e.HTTPStatus == 403 {
+		return "小米暂时拒绝访问，请稍后重试（HTTP 403）"
+	}
+	if e.HTTPStatus == 429 {
+		return "请求过于频繁，请稍后重试（HTTP 429）"
+	}
+	return fmt.Sprintf("小米服务响应异常，请稍后重试（HTTP %d，代码 %d）", e.HTTPStatus, e.Code)
 }
 func (c *Client) List(ctx context.Context, id string) ([]Entry, error) {
 	all := []Entry{}

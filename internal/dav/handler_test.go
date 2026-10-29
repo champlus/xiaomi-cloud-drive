@@ -476,3 +476,19 @@ func (b *laggingRenameBackend) List(ctx context.Context, parent string) ([]cloud
 	}
 	return items, err
 }
+
+type unavailableBackend struct{ *fake }
+
+func (f unavailableBackend) List(context.Context, string) ([]cloud.Entry, error) {
+	return nil, cloud.ErrAuth
+}
+func TestExpiredRootListingDoesNotMasqueradeAsEmptyDrive(t *testing.T) {
+	h := NewHandler(New(unavailableBackend{newFake()}), t.TempDir())
+	r := httptest.NewRequest("PROPFIND", "http://localhost/dav/", nil)
+	r.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expired cloud session appeared as a successful empty directory: HTTP %d", w.Code)
+	}
+}

@@ -40,21 +40,25 @@ type Event struct {
 	Text string    `json:"text"`
 }
 type Server struct {
-	Dir          string
-	Client       *cloud.Client
-	FS           *dav.FS
-	DAV          *dav.Handler
-	Runtime      Runtime
-	config       Config
-	configMu     sync.Mutex
-	events       []Event
-	mu           sync.Mutex
-	connected    bool
-	lastError    string
-	sessionMu    sync.Mutex
-	sessionBytes []byte
-	checking     bool
-	lock         *os.File
+	Dir           string
+	Client        *cloud.Client
+	FS            *dav.FS
+	DAV           *dav.Handler
+	Runtime       Runtime
+	config        Config
+	configMu      sync.Mutex
+	events        []Event
+	mu            sync.Mutex
+	connected     bool
+	lastError     string
+	sessionMu     sync.Mutex
+	sessionBytes  []byte
+	checking      bool
+	lock          *os.File
+	authRequired  bool
+	refreshFlight *sessionRefresh
+	saveSession   func([]byte) error
+	nativeSession bool
 }
 
 func random() string {
@@ -64,7 +68,7 @@ func random() string {
 	}
 	return hex.EncodeToString(b)
 }
-func New(dir string) (*Server, error) {
+func New(dir string, nativeSession ...bool) (*Server, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
@@ -77,7 +81,7 @@ func New(dir string) (*Server, error) {
 		lock.Close()
 		return nil, errors.New("米盘服务已在运行")
 	}
-	s := &Server{Dir: dir, Client: cloud.New(), config: Config{AutoMount: true}, lock: lock}
+	s := &Server{Dir: dir, Client: cloud.New(), config: Config{AutoMount: true}, lock: lock, nativeSession: len(nativeSession) > 0 && nativeSession[0]}
 	if b, err := os.ReadFile(filepath.Join(dir, "settings.json")); err == nil {
 		json.Unmarshal(b, &s.config)
 	}
@@ -85,15 +89,18 @@ func New(dir string) (*Server, error) {
 	s.FS.ReadOnly = s.config.ReadOnly
 	s.DAV = dav.NewHandler(s.FS, filepath.Join(dir, "待恢复文件"))
 	s.DAV.Event = s.Event
-	if b, err := keychain.Load(); err == nil && len(b) > 0 {
-		s.sessionBytes = append([]byte(nil), b...)
-		var cookies []*http.Cookie
-		if json.Unmarshal(b, &cookies) == nil {
-			s.Client.SetCookies(cookies)
+	if !s.nativeSession {
+		if b, err := keychain.Load(); err == nil && len(b) > 0 {
+			s.sessionBytes = append([]byte(nil), b...)
+			var cookies []*http.Cookie
+			if json.Unmarshal(b, &cookies) == nil {
+				s.Client.SetCookies(cookies)
+			}
+		} else if err != nil {
+			s.Event("error", err.Error())
 		}
-	} else if err != nil {
-		s.Event("error", err.Error())
 	}
+	s.installSessionHooks()
 	s.Runtime = Runtime{Token: random(), Password: random(), PID: os.Getpid()}
 	return s, nil
 }
@@ -109,7 +116,8 @@ func (s *Server) Event(kind, text string) {
 	}
 	if kind == "error" {
 		s.lastError = text
-		if text == cloud.ErrAuth.Error() {
+		if strings.HasPrefix(text, cloud.ErrAuth.Error()) {
+			s.authRequired = true
 			s.connected = false
 		}
 	}
@@ -180,6 +188,7 @@ func (s *Server) Check() {
 	s.mu.Lock()
 	s.checking = false
 	s.connected = err == nil
+	s.authRequired = errors.Is(err, cloud.ErrAuth)
 	if err != nil {
 		s.lastError = err.Error()
 	} else {
@@ -241,11 +250,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		connected := s.connected
 		lastError := s.lastError
 		checking := s.checking
+		authRequired := s.authRequired
+		renewing := s.refreshFlight != nil
 		s.mu.Unlock()
 		s.configMu.Lock()
 		config := s.config
 		s.configMu.Unlock()
-		respond(w, map[string]any{"version": "0.1.0", "connected": connected, "checking": checking, "error": lastError, "config": config, "events": events, "pending": s.DAV.Pending(), "davURL": "http://127.0.0.1:" + strconv.Itoa(s.Runtime.Port) + "/dav/"})
+		respond(w, map[string]any{"version": "0.1.0", "connected": connected, "checking": checking, "authRequired": authRequired, "renewing": renewing, "hasSession": s.Client.HasSession(), "sessionVersion": s.Client.SessionVersion(), "error": lastError, "config": config, "events": events, "pending": s.DAV.Pending(), "davURL": "http://127.0.0.1:" + strconv.Itoa(s.Runtime.Port) + "/dav/"})
 	case "/api/check":
 		if r.Method != "POST" {
 			w.WriteHeader(405)
@@ -253,6 +264,38 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		s.FS.Invalidate()
 		go s.Check()
+		respond(w, map[string]bool{"ok": true})
+	case "/api/session/cookies":
+		if r.Method != "GET" {
+			w.WriteHeader(405)
+			return
+		}
+		respond(w, map[string]any{"cookies": s.Client.Cookies(), "version": s.Client.SessionVersion()})
+	case "/api/session/refresh-failed":
+		if r.Method != "POST" {
+			w.WriteHeader(405)
+			return
+		}
+		var input struct {
+			Reason string `json:"reason"`
+		}
+		if decode(w, r, &input) != nil {
+			http.Error(w, "恢复结果无效", 400)
+			return
+		}
+		var err error
+		switch input.Reason {
+		case "login_required":
+			err = cloud.ErrAuth
+		case "network":
+			err = errors.New("暂时无法自动恢复连接，请稍后重试")
+		case "timeout":
+			err = errors.New("自动恢复连接超时，请重试")
+		default:
+			http.Error(w, "恢复结果无效", 400)
+			return
+		}
+		s.finishSessionRefresh(nil, err)
 		respond(w, map[string]bool{"ok": true})
 	case "/api/session":
 		if r.Method != "POST" {
@@ -262,7 +305,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.sessionMu.Lock()
 		defer s.sessionMu.Unlock()
 		var input struct {
-			Cookies []*http.Cookie `json:"cookies"`
+			Cookies    []*http.Cookie `json:"cookies"`
+			Background bool           `json:"background"`
 		}
 		if err := decode(w, r, &input); err != nil {
 			http.Error(w, "登录会话格式无效", 400)
@@ -270,26 +314,38 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		// Probe a new client first so a failed login never destroys a working session.
 		candidate := cloud.New()
+		candidate.Base = s.Client.Base
+		candidate.HTTP.Transport = s.Client.HTTP.Transport
 		if err := candidate.SetCookies(input.Cookies); err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+		if input.Background && s.Client.HasSession() && candidate.AccountKey() != s.Client.AccountKey() {
+			http.Error(w, "后台登录账号不一致，请在设置中确认", 409)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancel()
 		if _, err := candidate.List(ctx, "0"); err != nil {
-			http.Error(w, err.Error(), 502)
+			status := http.StatusBadGateway
+			if errors.Is(err, cloud.ErrAuth) {
+				status = http.StatusUnauthorized
+			}
+			http.Error(w, err.Error(), status)
 			return
 		}
 		b, _ := json.Marshal(candidate.Cookies())
-		if err := keychain.Save(b); err != nil {
+		if err := s.storeSession(b); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		s.sessionBytes = append([]byte(nil), b...)
 		s.Client.SetCookies(candidate.Cookies())
+		s.finishSessionRefresh(nil, nil)
 		s.FS.Invalidate()
 		s.mu.Lock()
 		s.connected = true
+		s.authRequired = false
 		s.lastError = ""
 		s.mu.Unlock()
 		s.Event("success", "已连接小米云盘")
@@ -303,9 +359,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		defer s.FS.Mutation.Unlock()
 		s.sessionMu.Lock()
 		defer s.sessionMu.Unlock()
-		if err := keychain.Delete(); err != nil {
-			http.Error(w, err.Error(), 500)
-			return
+		if !s.nativeSession {
+			if err := keychain.Delete(); err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
 		}
 		s.clearSession()
 		s.sessionBytes = nil
@@ -355,19 +413,23 @@ func (s *Server) persistSession() {
 	if bytes.Equal(b, s.sessionBytes) {
 		return
 	}
-	if err := keychain.Save(b); err != nil {
+	if err := s.storeSession(b); err != nil {
 		s.Event("error", err.Error())
 		return
 	}
 	s.sessionBytes = append([]byte(nil), b...)
 }
-func (s *Server) clearSession() { s.Client.ClearCookies(); s.FS.Invalidate() }
+func (s *Server) clearSession() {
+	s.Client.ClearCookies()
+	s.finishSessionRefresh(nil, errors.New("已退出登录"))
+	s.FS.Invalidate()
+}
 func DefaultDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "Application Support", "米盘")
 }
-func Run(ctx context.Context, dir string) error {
-	s, err := New(dir)
+func Run(ctx context.Context, dir string, nativeSession ...bool) error {
+	s, err := New(dir, nativeSession...)
 	if err != nil {
 		return err
 	}

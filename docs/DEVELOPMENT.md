@@ -11,6 +11,14 @@ scripts/build.sh
 scripts/install.sh
 ```
 
+本地开发构建必须使用固定代码签名身份，避免每版临时签名改变钥匙串信任身份。可设置 `MIDRIVE_SIGN_IDENTITY`，或在 `~/Library/Application Support/米盘构建/signing.json` 保存公开的证书指纹：
+
+```json
+{"identity":"证书的40位SHA-1指纹"}
+```
+
+用 `security find-identity -v -p codesigning` 查看可用身份。配置的身份不可用时构建会失败，不会自动退回临时签名；私钥留在钥匙串中。CI 可以临时签名，本机临时测试需显式设置 `MIDRIVE_SIGN_IDENTITY=-`，这类构建不保证跨版本继承授权。稳定签名构建后运行 `python3 tests/signing_test.py`，会比较两份不同程序的签名身份，验证更新不会改变钥匙串识别的身份。
+
 构建产物为 `dist/米盘.app`，安装到 `~/Applications/米盘.app`。CLI 链接位于 `~/.local/bin/mipan`。
 
 更新正在运行的开发版本：
@@ -28,7 +36,7 @@ python3 scripts/reload-dev.py
 scripts/test.sh
 ```
 
-该命令运行 Go 单测、竞态检查、静态检查和原生服务名称测试。CI 同时检查 App 构建与发布包。
+该命令运行 Go 单测、竞态检查、静态检查、原生服务名称测试和登录保持策略测试。登录测试模拟会话轮换、60 天有效期的重启恢复、失败后的退避与请求恢复，不等待真实月份，也不接触真实账号凭据。CI 同时检查 App 构建与发布包。
 
 安装后可检查应用签名与图标：
 
