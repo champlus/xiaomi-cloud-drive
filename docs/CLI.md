@@ -2,6 +2,19 @@
 
 `mipan` 调用正在运行的米盘服务，不需要 agent 处理小米密码或 Cookie。未运行时先打开米盘 App。
 
+## 安装
+
+从源码安装会自动设置命令。使用下载的 App 时，可运行：
+
+```sh
+mkdir -p ~/.local/bin
+ln -sfn "/Applications/米盘.app/Contents/MacOS/mipan" ~/.local/bin/mipan
+```
+
+如果 App 放在个人「应用程序」目录，将 `/Applications` 改为 `~/Applications` 对应的实际路径。可直接运行 `~/.local/bin/mipan`；也可把 `~/.local/bin` 加入 PATH。
+
+## 用法
+
 ```sh
 ~/.local/bin/mipan --json status
 ~/.local/bin/mipan --json ls /售后凭据

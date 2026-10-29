@@ -19,9 +19,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cham/xiaomi-netdisk-pro/internal/cloud"
-	"github.com/cham/xiaomi-netdisk-pro/internal/dav"
-	"github.com/cham/xiaomi-netdisk-pro/internal/keychain"
+	"github.com/champlus/xiaomi-cloud-drive/internal/cloud"
+	"github.com/champlus/xiaomi-cloud-drive/internal/dav"
+	"github.com/champlus/xiaomi-cloud-drive/internal/keychain"
 )
 
 type Config struct {

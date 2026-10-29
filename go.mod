@@ -1,4 +1,4 @@
-module github.com/cham/xiaomi-netdisk-pro
+module github.com/champlus/xiaomi-cloud-drive
 
 go 1.25.2
 

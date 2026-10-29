@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cham/xiaomi-netdisk-pro/internal/cloud"
+	"github.com/champlus/xiaomi-cloud-drive/internal/cloud"
 	"golang.org/x/net/webdav"
 	"golang.org/x/text/unicode/norm"
 )

@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/cham/xiaomi-netdisk-pro/internal/app"
+	"github.com/champlus/xiaomi-cloud-drive/internal/app"
 	"os"
 	"os/signal"
 	"syscall"

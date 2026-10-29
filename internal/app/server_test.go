@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cham/xiaomi-netdisk-pro/internal/cloud"
-	"github.com/cham/xiaomi-netdisk-pro/internal/dav"
+	"github.com/champlus/xiaomi-cloud-drive/internal/cloud"
+	"github.com/champlus/xiaomi-cloud-drive/internal/dav"
 )
 
 func testServer(t *testing.T) *Server {

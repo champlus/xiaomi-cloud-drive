@@ -2,7 +2,7 @@
 
 ## 已验证的接口
 
-通过用户已登录的 [小米云盘官方网页版](https://i.mi.com/drive/h5) 核对当前请求，并以独立测试目录验证。现行网页版源码用于识别请求字段；项目没有复制第三方登录代码，也不接触账号密码。
+根据 [小米云盘官方网页版](https://i.mi.com/drive/h5) 的实际请求，以独立测试目录验证。现行网页版源码用于识别请求字段；项目没有复制第三方登录代码，也不接触账号密码。
 
 | 功能 | 当前网页版接口 |
 | --- | --- |
@@ -35,6 +35,6 @@ macOS 自带 WebDAV 客户端即可挂载，不需要 FUSE。Swift 通过 NetFS 
 
 ## 设计
 
-设置使用 SwiftUI NavigationSplitView，布局参照用户本机 `/Users/cham/Codes/lyrimuse/lyli` 的 SettingsPage、SettingsCard 和 SettingsRow：20 点图标列、12 点间距、14 点水平内边距、11 点垂直内边距。分为云盘、通用、传输，常用操作直接可见。
+设置使用 SwiftUI NavigationSplitView，布局参考 Lyli 的 SettingsPage、SettingsCard 和 SettingsRow：20 点图标列、12 点间距、14 点水平内边距、11 点垂直内边距。分为云盘、通用、传输，常用操作直接可见。
 
-应用图标使用用户提供的 PNG 原图。官方登录页面是唯一的 WebKit 界面，设置本身不包含网页。
+应用图标使用小米云服务图标。官方登录页面是唯一的 WebKit 界面，设置本身不包含网页。

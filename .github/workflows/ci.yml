@@ -1,0 +1,32 @@
+name: 测试与构建
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: 单元测试与原生检查
+        run: scripts/test.sh
+      - name: 构建与打包
+        run: |
+          scripts/build.sh
+          scripts/package.sh
+          python3 tests/release_test.py

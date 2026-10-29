@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cham/xiaomi-netdisk-pro/internal/cloud"
+	"github.com/champlus/xiaomi-cloud-drive/internal/cloud"
 )
 
 type fake struct {

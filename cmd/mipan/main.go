@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/cham/xiaomi-netdisk-pro/internal/app"
-	"github.com/cham/xiaomi-netdisk-pro/internal/cli"
+	"github.com/champlus/xiaomi-cloud-drive/internal/app"
+	"github.com/champlus/xiaomi-cloud-drive/internal/cli"
 	"os"
 	"path/filepath"
 	"strings"
