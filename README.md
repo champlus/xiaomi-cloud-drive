@@ -4,7 +4,7 @@
 
 把小米云盘挂载到 macOS Finder，像打开文件夹一样管理云端文件。
 
-原生 SwiftUI 界面，支持自启动、上传下载和命令行，无需 macFUSE。
+支持上传下载、文件管理、自动连接和命令行。
 
 [下载 Mac 版](https://github.com/champlus/xiaomi-cloud-drive/releases/latest) · [使用说明](docs/USAGE.md) · [命令行](docs/CLI.md)
 
@@ -15,7 +15,7 @@
 ## 功能
 
 - **Finder 挂载**：浏览、预览、上传、下载、重命名和管理文件夹。
-- **原生界面**：菜单栏常驻，设置简单。
+- **菜单栏入口**：随时打开云盘和设置。
 - **自动连接**：登录 Mac 后启动，自动挂载小米云盘。
 - **CLI**：支持 `--json`，可供脚本和 Codex 等 agent 调用。
 
@@ -53,9 +53,3 @@ scripts/install.sh
 ```
 
 [开发与测试](docs/DEVELOPMENT.md) · [接口说明](docs/RESEARCH.md)
-
-## 使用范围
-
-这是小米云盘的在线挂载工具，文件按需下载。单文件需小于 4 GiB；空文件先保存在本机，写入内容后上传。暂不支持端到端加密账号。
-
-米盘是非官方客户端。
