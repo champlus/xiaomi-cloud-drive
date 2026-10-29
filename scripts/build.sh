@@ -3,9 +3,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 APP="$ROOT/dist/米盘.app"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/Info.plist)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o "$APP/Contents/MacOS/midrive-service" ./cmd/midrive
-CGO_ENABLED=1 go build -trimpath -ldflags='-s -w' -o "$APP/Contents/MacOS/mipan" ./cmd/mipan
+CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/champlus/xiaomi-cloud-drive/internal/app.Version=$VERSION" -o "$APP/Contents/MacOS/midrive-service" ./cmd/midrive
+CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/champlus/xiaomi-cloud-drive/internal/app.Version=$VERSION" -o "$APP/Contents/MacOS/mipan" ./cmd/mipan
 swiftc -swift-version 5 -O -framework AppKit -framework WebKit -framework NetFS -framework Security macos/WebSession.swift macos/WebSessionStore.swift macos/main.swift macos/SettingsView.swift macos/LocalServiceName.swift -o "$APP/Contents/MacOS/米盘"
 rm -f "$APP/Contents/Resources/AppIcon.icns"
 cp macos/Info.plist "$APP/Contents/Info.plist"

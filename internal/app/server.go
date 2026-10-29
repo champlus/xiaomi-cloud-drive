@@ -24,6 +24,8 @@ import (
 	"github.com/champlus/xiaomi-cloud-drive/internal/keychain"
 )
 
+var Version = "dev"
+
 type Config struct {
 	ReadOnly  bool `json:"readOnly"`
 	AutoMount bool `json:"autoMount"`
@@ -256,7 +258,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.configMu.Lock()
 		config := s.config
 		s.configMu.Unlock()
-		respond(w, map[string]any{"version": "0.1.0", "connected": connected, "checking": checking, "authRequired": authRequired, "renewing": renewing, "hasSession": s.Client.HasSession(), "sessionVersion": s.Client.SessionVersion(), "error": lastError, "config": config, "events": events, "pending": s.DAV.Pending(), "davURL": "http://127.0.0.1:" + strconv.Itoa(s.Runtime.Port) + "/dav/"})
+		respond(w, map[string]any{"version": Version, "connected": connected, "checking": checking, "authRequired": authRequired, "renewing": renewing, "hasSession": s.Client.HasSession(), "sessionVersion": s.Client.SessionVersion(), "error": lastError, "config": config, "events": events, "pending": s.DAV.Pending(), "davURL": "http://127.0.0.1:" + strconv.Itoa(s.Runtime.Port) + "/dav/"})
 	case "/api/check":
 		if r.Method != "POST" {
 			w.WriteHeader(405)

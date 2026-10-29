@@ -178,3 +178,16 @@ func TestNativeSessionSnapshotRequiresLocalAuthentication(t *testing.T) {
 		t.Fatal("status leaked cloud session")
 	}
 }
+
+func TestStatusReportsBuildVersion(t *testing.T) {
+	s := testServer(t)
+	r := httptest.NewRequest("GET", "http://127.0.0.1:1234/api/status", nil)
+	r.Header.Set("Authorization", "Bearer admin-secret")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	var state map[string]any
+	json.Unmarshal(w.Body.Bytes(), &state)
+	if state["version"] != Version {
+		t.Fatal("status does not report the version injected at build time")
+	}
+}
