@@ -79,3 +79,9 @@ python3 tests/credential_release_test.py
 ```
 
 发布包只包含 App、独立 CLI 和校验文件，不包含登录状态、本机配置或日志。
+
+## 传输状态
+
+`internal/transfer` 采集实际读写字节、计算最近三秒的速度并持久化按账号隔离的文件记录。进度更新仅写内存；任务开始和结束时原子保存私有文件。`/api/status` 返回结构化的 active、completed、failed 列表。
+
+Finder 的流式 PUT 可能提供 `X-Expected-Entity-Length` 后保持请求流打开；`internal/dav/finder_test.go` 使用本地 TCP 复现并检查完整接收、错误长度和原文件保护。该测试与传输进度测试不访问真实小米账号。原生速度格式、时间、进度与退出保护由 `tests/TransferTests.swift` 覆盖，统一纳入 `scripts/test.sh`。

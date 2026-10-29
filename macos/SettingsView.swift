@@ -1,12 +1,6 @@
 import SwiftUI
 import AppKit
 
-struct Activity: Identifiable {
-    let id: Int
-    let text: String
-    let kind: String
-    let time: Date
-}
 final class SettingsModel: ObservableObject {
     weak var app: AppDelegate?
     @Published var connected = false
@@ -21,15 +15,17 @@ final class SettingsModel: ObservableObject {
     @Published var readOnly = false
     @Published var busy = false
     @Published var error = ""
-    @Published var pending = 0
-    @Published var activities: [Activity] = []
+    @Published var transfers = TransferSnapshot()
+    @Published var recoveryIDs: Set<String> = []
+    private var refreshing = false
+    var transferCount: Int { Set(transfers.active.map(\.id) + transfers.failed.map(\.id)).union(recoveryIDs).count }
     var connectionLabel: String { ConnectionPresentation.label(connected: connected, checking: checking, renewing: renewing, keychainRequired: keychainRequired, authRequired: authRequired, hasSession: hasSession) }
     init(app: AppDelegate) { self.app = app }
     func refresh() {
-        guard let app = app else { return }
+        guard let app = app, !refreshing else { return }; refreshing = true
         mounted = app.isMounted(); startup = app.startup; keychainRequired = app.webSession.needsAuthorization
         app.request("status") { [weak self] result in
-            guard let self = self else { return }
+            guard let self = self else { return }; self.refreshing = false
             switch result {
             case .failure(let err): self.error = err.localizedDescription
             case .success(let state):
@@ -39,14 +35,14 @@ final class SettingsModel: ObservableObject {
                 self.authRequired = state["authRequired"] as? Bool ?? false
                 self.hasSession = state["hasSession"] as? Bool ?? false
                 self.error = state["error"] as? String ?? ""
-                self.pending = (state["pending"] as? [[String: Any]])?.count ?? 0
+                let pending = state["pending"] as? [[String: Any]] ?? []
+                self.recoveryIDs = Set(pending.filter { !["receiving", "uploading"].contains($0["state"] as? String ?? "") }.compactMap { $0["id"] as? String })
+                do { self.transfers = try TransferSnapshot.decode(state["transfers"]) }
+                catch { self.error = "无法读取传输状态" }
                 let config = state["config"] as? [String: Any] ?? [:]
                 self.autoMount = config["autoMount"] as? Bool ?? true
                 self.readOnly = config["readOnly"] as? Bool ?? false
-                let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                self.activities = (state["events"] as? [[String: Any]] ?? []).enumerated().map { index, value in
-                    Activity(id: index, text: value["text"] as? String ?? "", kind: value["kind"] as? String ?? "", time: formatter.date(from: value["time"] as? String ?? "") ?? Date())
-                }.suffix(4).reversed()
+
             }
         }
     }
@@ -84,6 +80,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var selection: SettingsTab? = .cloud
+    @State private var lastRefresh = Date.distantPast
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
@@ -93,9 +90,9 @@ struct SettingsView: View {
                         Label {
                             HStack {
                                 Text(tab.title)
-                                if tab == .transfers && model.pending > 0 {
+                                if tab == .transfers && model.transferCount > 0 {
                                     Spacer()
-                                    Text("\(model.pending)").font(.caption).foregroundStyle(.secondary)
+                                    Text("\(model.transferCount)").font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                         } icon: {
@@ -127,7 +124,11 @@ struct SettingsView: View {
         }
         .frame(minWidth: 700, idealWidth: 760, minHeight: 460, idealHeight: 520)
         .onAppear { model.refresh() }
-        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in if !model.busy { model.refresh() } }
+        .onChange(of: selection) { _, _ in model.refresh() }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+            guard !model.busy, now.timeIntervalSince(lastRefresh) >= (selection == .transfers ? 1 : 3) else { return }
+            lastRefresh = now; model.refresh()
+        }
     }
     private func title(_ text: String) -> some View {
         Text(text).font(.system(size: 22, weight: .bold)).frame(maxWidth: .infinity).padding(.bottom, 6)
@@ -188,62 +189,13 @@ struct SettingsView: View {
         }
     }
     private var transfersPage: some View {
-        Group {
-            title("传输")
-            if model.pending > 0 {
-                SettingsCard {
-                    SettingsRow(icon: "arrow.up.circle", title: "\(model.pending) 项未完成") {
-                        Button("查看文件") { if let app = model.app { NSWorkspace.shared.open(app.support.appendingPathComponent("待恢复文件")) } }
-                    }
-                }
-            }
-            SettingsCard {
-                if model.activities.isEmpty {
-                    SettingsRow(icon: "clock", title: "暂无传输记录") { EmptyView() }
-                } else {
-                    ForEach(model.activities) { activity in
-                        if activity.id != model.activities.first?.id { CardDivider() }
-                        SettingsRow(icon: activity.kind == "error" ? "exclamationmark.circle" : activity.kind == "transfer" ? "arrow.up.circle" : "checkmark.circle", title: activity.text) {
-                            Text(activity.time, style: .time).font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-            if !model.error.isEmpty && !model.renewing && !model.keychainRequired { errorRow }
+        TransfersView(snapshot: model.transfers, recoveryCount: model.recoveryIDs.count) {
+            if let app = model.app { NSWorkspace.shared.open(app.support.appendingPathComponent("待恢复文件")) }
         }
     }
     private var errorRow: some View {
         SettingsCard {
             SettingsRow(icon: "exclamationmark.circle", title: model.error) { Button("重试", action: model.check) }
         }
-    }
-}
-
-// Uses Lyli's settings layout metrics: a 20 pt icon column, 12 pt gap,
-// 14 pt horizontal insets and 11 pt vertical insets.
-private struct SettingsCard<Content: View>: View {
-    @ViewBuilder let content: () -> Content
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        VStack(spacing: 0, content: content)
-            .background(shape.fill(Color.primary.opacity(0.05)))
-            .overlay(shape.strokeBorder(Color.primary.opacity(0.07), lineWidth: 0.5))
-    }
-}
-private struct CardDivider: View {
-    var body: some View { Divider().padding(.leading, 46) }
-}
-private struct SettingsRow<Trailing: View>: View {
-    let icon: String
-    let title: String
-    @ViewBuilder let trailing: () -> Trailing
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: icon).font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 20)
-            Text(title).font(.system(size: 13))
-            Spacer(minLength: 12)
-            HStack(spacing: 8, content: trailing).labelsHidden().toggleStyle(.switch).fixedSize(horizontal: true, vertical: false)
-        }
-        .padding(.horizontal, 14).padding(.vertical, 11)
     }
 }

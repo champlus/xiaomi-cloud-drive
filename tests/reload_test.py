@@ -10,6 +10,17 @@ import unittest
 from unittest.mock import patch
 
 class Reload(unittest.TestCase):
+    def test_active_download_is_not_interrupted_by_update(self):
+        script=Path(__file__).resolve().parents[1]/'scripts/reload-dev.py'
+        with tempfile.TemporaryDirectory() as d:
+            home=Path(d);support=home/'Library/Application Support/米盘';support.mkdir(parents=True)
+            (support/'runtime.json').write_text(json.dumps({'port':12345,'token':'synthetic-local-token','pid':424242}))
+            response=io.BytesIO(b'{"pending":[],"transfers":{"active":[{"id":"download-1","direction":"download","state":"active"}]}}')
+            with patch.object(Path,'home',return_value=home), patch('subprocess.run',side_effect=AssertionError('updater attempted to interrupt an active download')) as run, patch('os.kill') as kill, patch('urllib.request.urlopen',return_value=response):
+                with self.assertRaisesRegex(SystemExit,'文件正在传输'):
+                    runpy.run_path(str(script),run_name='__main__')
+                run.assert_not_called();kill.assert_not_called()
+
     def test_restored_launch_agent_is_the_only_app_launcher(self):
         script=Path(__file__).resolve().parents[1]/'scripts/reload-dev.py'
         with tempfile.TemporaryDirectory() as d:

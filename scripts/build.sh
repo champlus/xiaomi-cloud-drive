@@ -7,7 +7,7 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macos/
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/champlus/xiaomi-cloud-drive/internal/app.Version=$VERSION" -o "$APP/Contents/MacOS/midrive-service" ./cmd/midrive
 CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X github.com/champlus/xiaomi-cloud-drive/internal/app.Version=$VERSION" -o "$APP/Contents/MacOS/mipan" ./cmd/mipan
-swiftc -swift-version 5 -O -framework AppKit -framework WebKit -framework NetFS -framework Security macos/WebSession.swift macos/CredentialBroker.swift macos/WebSessionStore.swift macos/main.swift macos/SettingsView.swift macos/LocalServiceName.swift -o "$APP/Contents/MacOS/米盘"
+swiftc -swift-version 5 -O -framework AppKit -framework WebKit -framework NetFS -framework Security macos/WebSession.swift macos/Transfer.swift macos/SettingsComponents.swift macos/TransfersView.swift macos/CredentialBroker.swift macos/WebSessionStore.swift macos/main.swift macos/SettingsView.swift macos/LocalServiceName.swift -o "$APP/Contents/MacOS/米盘"
 rm -f "$APP/Contents/Resources/AppIcon.icns"
 cp macos/Info.plist "$APP/Contents/Info.plist"
 cp macos/AppIcon.png "$APP/Contents/Resources/AppIcon.png"

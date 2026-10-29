@@ -333,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     func showError(_ text: String) { let alert = NSAlert(); alert.messageText = "米盘"; alert.informativeText = text; alert.addButton(withTitle: "好"); NSApp.activate(ignoringOtherApps: true); alert.runModal() }
     @objc func quit() {
         request("status") { result in
-            if case .success(let state) = result, let pending = state["pending"] as? [[String: Any]], pending.contains(where: { ["receiving", "uploading"].contains($0["state"] as? String ?? "") }) { self.showError("文件正在传输，请等传输完成后再退出。"); return }
+            if case .success(let state) = result, TransferSafety.hasActive(state) { self.showError("文件正在传输，请等传输完成后再退出。"); return }
             self.stopping = true; self.unmount { error in if let error = error { self.stopping = false; self.showError(error); return }; self.service?.terminate(); NSApp.terminate(nil) }
         }
     }

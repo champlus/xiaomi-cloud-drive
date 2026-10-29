@@ -55,3 +55,5 @@ ln -sfn "/Applications/米盘.app/Contents/MacOS/mipan" ~/.local/bin/mipan
 > 使用 `~/.local/bin/mipan --json` 访问我的小米云盘。先查询 status，再按任务执行 ls、stat、get、put、mkdir、mv、cp 或 rm。远端路径以 `/` 为根；目录上传和删除需要 `--recursive`。依照用户授权范围执行写操作。
 
 使用非默认开发服务时，可通过 `MIDRIVE_DATA_DIR` 指向该服务的数据目录。
+
+`status` 中的 `transfers.active`、`transfers.completed`、`transfers.failed` 分别返回正在传输、已完成和未完成的文件记录。记录包含 `path`、`direction`、`phase`、`bytes`、`total`、`speed`、`startedAt` 和 `finishedAt`；速度单位为字节/秒，未知总大小为 -1。`partial` 表示部分下载，不能据此认定整个文件已下载。`pending` 仍用于查询保留在本机的上传副本。

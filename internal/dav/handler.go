@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/champlus/xiaomi-cloud-drive/internal/cloud"
+	"github.com/champlus/xiaomi-cloud-drive/internal/transfer"
 	"golang.org/x/net/webdav"
 )
 
@@ -32,16 +33,22 @@ type Pending struct {
 	Time       time.Time `json:"time"`
 }
 type Handler struct {
-	FS      *FS
-	DAV     *webdav.Handler
-	Dir     string
-	Event   func(string, string)
-	mu      sync.Mutex
-	pending map[string]*Pending
+	FS        *FS
+	DAV       *webdav.Handler
+	Dir       string
+	Event     func(string, string)
+	Transfers *transfer.Tracker
+	mu        sync.Mutex
+	pending   map[string]*Pending
 }
 
-func NewHandler(fs *FS, dir string) *Handler {
+func NewHandler(fs *FS, dir string, scope ...func() string) *Handler {
 	h := &Handler{FS: fs, Dir: dir, pending: map[string]*Pending{}}
+	var account func() string
+	if len(scope) > 0 {
+		account = scope[0]
+	}
+	h.Transfers = transfer.New(filepath.Join(dir, ".transfers", "history.json"), account)
 	os.MkdirAll(dir, 0700)
 	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	for _, file := range files {
@@ -113,6 +120,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if r.Method == "PUT" && !finderPlaceholder(r) && !ignored(clean(strings.TrimPrefix(r.URL.Path, prefix))) {
+		expected, _, _ := uploadSize(r)
+		task := h.Transfers.Begin("upload", clean(strings.TrimPrefix(r.URL.Path, prefix)), expected)
+		r = r.WithContext(transfer.WithProgress(r.Context(), task.ID(), task.Report))
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{&transfer.Reader{Reader: r.Body, Context: r.Context(), Phase: "receiving", Total: expected}, r.Body}
+		response := &transferResponse{ResponseWriter: w, task: task, direction: "upload", expected: r.ContentLength}
+		w = response
+		defer response.finish(r.Context())
+	}
 	switch r.Method {
 	case "PUT", "MKCOL", "DELETE", "MOVE", "COPY", "PROPPATCH":
 		h.FS.Mutation.Lock()
@@ -143,6 +162,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if entry, err := h.FS.Resolve(r.Context(), strings.TrimPrefix(r.URL.Path, prefix)); err == nil && !entry.IsDir() {
 			contentType, _ := (info{entry}).ContentType(r.Context())
 			w.Header().Set("Content-Type", contentType)
+			if r.Method == "GET" && !ignored(clean(strings.TrimPrefix(r.URL.Path, prefix))) {
+				task := h.Transfers.Begin("download", clean(strings.TrimPrefix(r.URL.Path, prefix)), entry.Size)
+				task.Report(transfer.Progress{Phase: "downloading", Total: entry.Size})
+				response := &transferResponse{ResponseWriter: w, task: task, direction: "download", expected: entry.Size, fileSize: entry.Size}
+				w = response
+				defer response.finish(r.Context())
+			}
 		}
 	}
 	if r.Method == "PUT" {
@@ -193,6 +219,15 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
+	expected, hinted, sizeErr := uploadSize(r)
+	if sizeErr != nil {
+		http.Error(w, sizeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if expected >= cloud.MaxFileSize {
+		http.Error(w, "小米云盘单个文件需小于 4 GB", 413)
+		return
+	}
 	h.FS.Mutation.Lock()
 	defer h.FS.Mutation.Unlock()
 	if h.FS.ReadOnly {
@@ -236,9 +271,12 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	idBytes := make([]byte, 12)
-	rand.Read(idBytes)
-	id := hex.EncodeToString(idBytes)
+	id := transfer.ID(r.Context())
+	if id == "" {
+		idBytes := make([]byte, 12)
+		rand.Read(idBytes)
+		id = hex.EncodeToString(idBytes)
+	}
 	file, err := os.OpenFile(filepath.Join(h.Dir, id+".data"), os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
 		h.fail(w, err)
@@ -246,11 +284,12 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request) {
 	}
 	p := &Pending{ID: id, Path: name, File: file.Name(), OriginalID: old.ID, Revision: old.Revision, State: "receiving", Time: time.Now()}
 	h.add(p)
-	n, err := io.Copy(file, io.LimitReader(r.Body, cloud.MaxFileSize))
+	transfer.Report(r.Context(), transfer.Progress{Phase: "receiving", Total: expected})
+	n, err := receiveFile(w, r, file, expected, hinted)
 	h.mu.Lock()
 	p.Size = n
 	h.mu.Unlock()
-	if err == nil && r.ContentLength >= 0 && n != r.ContentLength {
+	if err == nil && expected >= 0 && n != expected {
 		err = io.ErrUnexpectedEOF
 	}
 	if err == nil && n >= cloud.MaxFileSize {
@@ -294,6 +333,9 @@ func (h *Handler) publish(ctx context.Context, parent, base string, old cloud.En
 	fresh, err := h.FS.Backend.Upload(ctx, parent, stageName, file)
 	if err != nil {
 		return cloud.Entry{}, err
+	}
+	if info, e := file.Stat(); e == nil {
+		transfer.Report(ctx, transfer.Progress{Phase: "committing", Bytes: info.Size(), Total: info.Size()})
 	}
 	// Re-read cloud state before replacing, including edits made in the official client.
 	h.FS.Invalidate()

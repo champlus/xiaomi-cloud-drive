@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/champlus/xiaomi-cloud-drive/internal/transfer"
 )
 
 const BlockSize = 4 << 20
@@ -32,6 +34,7 @@ func (c *Client) Upload(ctx context.Context, parent, name string, file *os.File)
 	if err != nil {
 		return Entry{}, err
 	}
+	transfer.Report(ctx, transfer.Progress{Phase: "preparing", Total: stat.Size()})
 	if stat.Size() >= MaxFileSize {
 		return Entry{}, errors.New("小米云盘单个文件需小于 4 GB")
 	}
@@ -87,12 +90,14 @@ func (c *Client) Upload(ctx context.Context, parent, name string, file *os.File)
 		return Entry{}, err
 	}
 	if created.Exists && created.ID != "" {
+		transfer.Report(ctx, transfer.Progress{Phase: "committing", Bytes: stat.Size(), Total: stat.Size()})
 		return Entry{ID: created.ID, Name: name, Type: "file", Size: stat.Size(), SHA1: hex.EncodeToString(hash.Sum(nil)), Modified: time.Now().UnixMilli()}, nil
 	}
 	if len(created.KSS.Nodes) == 0 || !storageURL(created.KSS.Nodes[0]) || len(created.KSS.Blocks) != len(blocks) {
 		return Entry{}, errors.New("小米返回了无效上传分片")
 	}
 	commits := []map[string]string{}
+	transfer.Report(ctx, transfer.Progress{Phase: "uploading", Total: stat.Size()})
 	for i, block := range created.KSS.Blocks {
 		commit := block.Commit
 		if block.Existed != 1 {
@@ -103,7 +108,9 @@ func (c *Client) Upload(ctx context.Context, parent, name string, file *os.File)
 			endpoint := strings.TrimSuffix(created.KSS.Nodes[0], "/") + "/upload_block_chunk?" + url.Values{"chunk_pos": {"0"}, "file_meta": {created.KSS.Meta}, "block_meta": {block.Meta}}.Encode()
 			for attempt := 0; attempt < 3; attempt++ {
 				r := io.NewSectionReader(file, int64(i)*BlockSize, blocks[i].Size)
-				req, _ := http.NewRequestWithContext(ctx, "POST", endpoint, r)
+				transfer.Report(ctx, transfer.Progress{Phase: "uploading", Bytes: int64(i) * BlockSize, Total: stat.Size()})
+				body := &transfer.Reader{Reader: r, Context: ctx, Phase: "uploading", Offset: int64(i) * BlockSize, Total: stat.Size()}
+				req, _ := http.NewRequestWithContext(ctx, "POST", endpoint, body)
 				req.ContentLength = blocks[i].Size
 				req.Header.Set("Content-Type", "application/octet-stream")
 				req.Header.Set("Origin", c.Base)
@@ -133,8 +140,10 @@ func (c *Client) Upload(ctx context.Context, parent, name string, file *os.File)
 		if commit == "" {
 			return Entry{}, errors.New("上传分片缺少确认信息")
 		}
+		transfer.Report(ctx, transfer.Progress{Phase: "uploading", Bytes: int64(i)*BlockSize + blocks[i].Size, Total: stat.Size()})
 		commits = append(commits, map[string]string{"commit_meta": commit})
 	}
+	transfer.Report(ctx, transfer.Progress{Phase: "committing", Bytes: stat.Size(), Total: stat.Size()})
 	j, _ := json.Marshal(commits)
 	var entry Entry
 	err = c.call(ctx, "POST", "/drive/v2/user/files/commit", url.Values{"uploadId": {created.UploadID}, "file_meta": {created.KSS.Meta}, "commit_metas": {string(j)}, "parentId": {parent}}, &entry)

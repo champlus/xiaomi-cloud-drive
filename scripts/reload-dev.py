@@ -16,6 +16,7 @@ launch_label=f'gui/{os.getuid()}/dev.cham.midrive'
 launch_plist=Path.home()/'Library/LaunchAgents/dev.cham.midrive.plist'
 app=Path.home()/'Applications/米盘.app'
 pending=[]
+active_transfers=[]
 # Even a process blocked before runtime.json exists can have recovery records.
 for record in (support/'待恢复文件').glob('*.json'):
     try: pending.append(json.loads(record.read_text()))
@@ -24,10 +25,12 @@ if runtime_file.exists():
     runtime=json.loads(runtime_file.read_text())
     request=urllib.request.Request(f'http://127.0.0.1:{runtime["port"]}/api/status',headers={'Authorization':'Bearer '+runtime['token']})
     try:
-        pending.extend(json.load(urllib.request.urlopen(request,timeout=5)).get('pending',[]))
+        state=json.load(urllib.request.urlopen(request,timeout=5))
+        pending.extend(state.get('pending',[]))
+        active_transfers=state.get('transfers',{}).get('active',[])
     except OSError:
         pass
-if any(item.get('state') in ('receiving','uploading') for item in pending):
+if active_transfers or any(item.get('state') in ('receiving','uploading') for item in pending):
     raise SystemExit('文件正在传输，请完成后更新。')
 
 restore_launch_job=subprocess.run(['launchctl','print',launch_label],capture_output=True).returncode==0

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/champlus/xiaomi-cloud-drive/internal/transfer"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -117,10 +119,26 @@ func TestUploadV2UsesBoundedBlocksAndCommits(t *testing.T) {
 			w.WriteHeader(404)
 		}
 	})
-	e, err := c.Upload(context.Background(), "42", "sample.bin", file)
+	var progressMu sync.Mutex
+	var progress []transfer.Progress
+	ctx := transfer.WithProgress(context.Background(), "fixture", func(p transfer.Progress) { progressMu.Lock(); progress = append(progress, p); progressMu.Unlock() })
+	e, err := c.Upload(ctx, "42", "sample.bin", file)
 	if err != nil || e.ID != "99" || blocks != 2 || !committed {
 		t.Fatalf("entry=%+v err=%v blocks=%d commit=%v", e, err, blocks, committed)
 	}
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	var sent int64
+	for _, p := range progress {
+		sent += p.Delta
+		if p.Bytes > int64(size) || p.Total != int64(size) {
+			t.Fatalf("invalid upload progress: %+v", p)
+		}
+	}
+	if len(progress) == 0 || sent != int64(size) || progress[len(progress)-1].Phase != "committing" {
+		t.Fatalf("missing actual network progress: %d bytes in %d updates", sent, len(progress))
+	}
+
 }
 func TestDownloadRangesAndDoesNotLeakCookies(t *testing.T) {
 	c := clientFixture(t, func(w http.ResponseWriter, r *http.Request) {
