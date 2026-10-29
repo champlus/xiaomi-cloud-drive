@@ -181,7 +181,7 @@ func (s *Server) Check() {
 	var err error
 	if s.Client.HasSession() {
 		_, err = s.Client.List(ctx, "0")
-	} else {
+	} else if !s.nativeSession {
 		err = cloud.ErrAuth
 	}
 	if err == nil {
@@ -189,7 +189,7 @@ func (s *Server) Check() {
 	}
 	s.mu.Lock()
 	s.checking = false
-	s.connected = err == nil
+	s.connected = err == nil && s.Client.HasSession()
 	s.authRequired = errors.Is(err, cloud.ErrAuth)
 	if err != nil {
 		s.lastError = err.Error()

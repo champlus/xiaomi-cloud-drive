@@ -30,3 +30,4 @@ jobs:
           scripts/build.sh
           scripts/package.sh
           python3 tests/release_test.py
+          python3 tests/credential_release_test.py

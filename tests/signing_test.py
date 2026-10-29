@@ -12,7 +12,7 @@ import unittest
 class Signing(unittest.TestCase):
     def test_local_development_build_has_a_stable_identity(self):
         app=Path(__file__).resolve().parents[1]/'dist/米盘.app'
-        for binary in [app,app/'Contents/MacOS/midrive-service',app/'Contents/MacOS/mipan']:
+        for binary in [app,app/'Contents/MacOS/midrive-service',app/'Contents/MacOS/mipan',app/'Contents/MacOS/credential-helper']:
             result=subprocess.run(['codesign','-d','-r-',str(binary)],capture_output=True,text=True)
             self.assertEqual(result.returncode,0)
             requirement=result.stdout+result.stderr

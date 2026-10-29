@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -228,5 +229,23 @@ func TestCookieRotationAdvancesNativePersistenceVersion(t *testing.T) {
 	}
 	if c.SessionVersion() <= before {
 		t.Fatal("native owner cannot detect newly rotated credentials to save them")
+	}
+}
+
+func TestRateLimitStopsFurtherAccountRequests(t *testing.T) {
+	for _, status := range []int{403, 429} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			calls := 0
+			c := clientFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(status)
+			})
+			c.List(context.Background(), "0")
+			c.List(context.Background(), "other-folder")
+			if calls != 1 {
+				t.Fatal("account requests continued immediately after access rejection or rate limiting")
+			}
+		})
 	}
 }

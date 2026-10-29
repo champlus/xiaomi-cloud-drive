@@ -18,6 +18,9 @@ private enum WebSessionVault {
         return data
     }
     static func load(interactive: Bool = false) throws -> [WebSessionCookie]? {
+        if let data = try CredentialBroker.run("read") {
+            return try JSONDecoder().decode(WebSessionArchive.self, from: data).cookies
+        }
         // A background read must return an actionable error, not freeze startup
         // behind a system password dialog. UI is enabled only by the user's button.
         SecKeychainSetUserInteractionAllowed(interactive)
@@ -25,7 +28,7 @@ private enum WebSessionVault {
         var cookies: [WebSessionCookie] = []
         let legacyNames: [String]
         if let data = try read(account) {
-            if let archive = try? JSONDecoder().decode(WebSessionArchive.self, from: data) { return archive.cookies }
+            if let archive = try? JSONDecoder().decode(WebSessionArchive.self, from: data) { try save(archive.cookies); return archive.cookies }
             // The first development version migrated only the web snapshot.
             // Complete that migration with the service's newer rotated token.
             cookies = try WebSessionCookie.decodeArchive(data)
@@ -42,17 +45,10 @@ private enum WebSessionVault {
         return nil
     }
     static func save(_ cookies: [WebSessionCookie]) throws {
-        SecKeychainSetUserInteractionAllowed(false)
         let data = try JSONEncoder().encode(WebSessionArchive(cookies))
-        let update = [kSecValueData as String: data]
-        var status = SecItemUpdate(query(account) as CFDictionary, update as CFDictionary)
-        if status == errSecItemNotFound {
-            var item = query(account); item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            status = SecItemAdd(item as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else { throw failure(status) }
+        _ = try CredentialBroker.run("write", data: data)
     }
+
     static func clear() throws {
         // An empty archive also prevents a future launch from reimporting an old
         // legacy session after the user explicitly signs out.
@@ -60,7 +56,7 @@ private enum WebSessionVault {
     }
     static func failure(_ status: OSStatus) -> NSError {
         let message = status == errSecInteractionNotAllowed || status == errSecAuthFailed
-            ? "钥匙串需要授权，请点击「授权钥匙串」"
+            ? "钥匙串需要授权，请点击「恢复登录」"
             : "无法保存或读取登录状态（钥匙串 \(status)）"
         return NSError(domain: "米盘钥匙串", code: Int(status), userInfo: [NSLocalizedDescriptionKey: message])
     }
@@ -74,6 +70,7 @@ final class WebSessionStore: NSObject, WKHTTPCookieStoreObserver {
     private var applying = false
     private var snapshotRevision: UInt64 = 0
     private var cachedCookies: [WebSessionCookie] = []
+    private let vaultQueue = DispatchQueue(label: "dev.cham.midrive.credentials")
     private var restoreInProgress = false
     private var restoreCallbacks: [() -> Void] = []
     var onError: ((String) -> Void)?
@@ -91,32 +88,53 @@ final class WebSessionStore: NSObject, WKHTTPCookieStoreObserver {
         guard !ready else { completion(); return }
         restoreCallbacks.append(completion)
         guard !restoreInProgress else { return }; restoreInProgress = true
-        do {
-            if let saved = try WebSessionVault.load() {
-                updateCredentialState(saved)
-                apply(saved.compactMap { $0.cookie() }) { self.finishRestoring() }; return
+        vaultQueue.async {
+            let result = Result { try WebSessionVault.load() }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let saved?):
+                    self.updateCredentialState(saved)
+                    self.apply(saved.compactMap { $0.cookie() }) { self.finishRestoring() }
+                case .failure(let error): self.handle(error); self.finishRestoring()
+                case .success(nil): self.restoreLegacyWebStore()
+                }
             }
-        } catch { handle(error); finishRestoring(); return }
+        }
+    }
+    private func restoreLegacyWebStore() {
         let legacy = WKWebsiteDataStore.default().httpCookieStore
         legacy.getAllCookies { cookies in
             let own = cookies.filter { WebSessionCookie($0).allowed && WebSessionCookie($0).cookie() != nil }
-            do {
-                try WebSessionVault.save(own.map(WebSessionCookie.init))
-                self.updateCredentialState(own.map(WebSessionCookie.init))
-                self.apply(own) {
-                    for cookie in own { legacy.delete(cookie) }
-                    self.finishRestoring()
+            self.vaultQueue.async {
+                let result = Result { try WebSessionVault.save(own.map(WebSessionCookie.init)) }
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        self.updateCredentialState(own.map(WebSessionCookie.init))
+                        self.apply(own) {
+                            for cookie in own { legacy.delete(cookie) }
+                            self.finishRestoring()
+                        }
+                    case .failure(let error): self.handle(error); self.finishRestoring()
+                    }
                 }
-            } catch { self.handle(error); self.finishRestoring() }
+            }
         }
     }
     func authorize(completion: @escaping (String?) -> Void) {
-        do {
-            let saved = try WebSessionVault.load(interactive: true) ?? []
-            needsAuthorization = false; updateCredentialState(saved)
-            apply(saved.compactMap { $0.cookie() }) { self.ready = true; completion(nil) }
-        } catch { handle(error); completion(error.localizedDescription) }
+        vaultQueue.async {
+            let result = Result { try WebSessionVault.load(interactive: true) ?? [] }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let saved):
+                    self.needsAuthorization = false; self.updateCredentialState(saved)
+                    self.apply(saved.compactMap { $0.cookie() }) { self.ready = true; completion(nil) }
+                case .failure(let error): self.handle(error); completion(error.localizedDescription)
+                }
+            }
+        }
     }
+
     private func finishRestoring() {
         ready = true; restoreInProgress = false
         let callbacks = restoreCallbacks; restoreCallbacks = []
@@ -133,8 +151,13 @@ final class WebSessionStore: NSObject, WKHTTPCookieStoreObserver {
             let received = cookies.map(WebSessionCookie.init).filter { $0.allowed && $0.cookie() != nil }
             let saved = WebSessionCookie.merging(self.cachedCookies, with: received)
             self.updateCredentialState(saved)
-            do { try WebSessionVault.save(saved) } catch { self.handle(error) }
-            completion()
+            self.vaultQueue.async {
+                let result = Result { try WebSessionVault.save(saved) }
+                DispatchQueue.main.async {
+                    if case .failure(let error) = result { self.handle(error) }
+                    completion()
+                }
+            }
         }
     }
     func apply(_ cookies: [HTTPCookie], completion: @escaping () -> Void) {
@@ -150,7 +173,15 @@ final class WebSessionStore: NSObject, WKHTTPCookieStoreObserver {
     }
     func clear(completion: @escaping (String?) -> Void) {
         applying = true; snapshotRevision &+= 1
-        do { try WebSessionVault.clear() } catch { applying = false; completion(error.localizedDescription); return }
+        vaultQueue.async {
+            let result = Result { try WebSessionVault.clear() }
+            DispatchQueue.main.async {
+                if case .failure(let error) = result { self.applying = false; completion(error.localizedDescription); return }
+                self.clearWebStore(completion: completion)
+            }
+        }
+    }
+    private func clearWebStore(completion: @escaping (String?) -> Void) {
         dataStore.httpCookieStore.getAllCookies { cookies in
             let group = DispatchGroup()
             for cookie in cookies { group.enter(); self.dataStore.httpCookieStore.delete(cookie) { group.leave() } }

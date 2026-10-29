@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     var nextMountAttempt = Date.distantPast
     var importingSession = false
     var connected = false
+    var connectionLabel = "连接中"
     var serviceReadyAttempts = 0
     lazy var webSession = WebSessionStore()
     var refreshPolicy = LoginRefreshPolicy()
@@ -40,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png"), let icon = NSImage(contentsOf: iconURL) { NSApp.applicationIconImage = icon }
+        if let iconName = Bundle.main.object(forInfoDictionaryKey: "CFBundleIconFile") as? String, let iconURL = Bundle.main.url(forResource: iconName, withExtension: "icns"), let icon = NSImage(contentsOf: iconURL) { NSApp.applicationIconImage = icon }
         if NSRunningApplication.runningApplications(withBundleIdentifier: "dev.cham.midrive").contains(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) { exit(EXIT_SUCCESS) }
         configureMainMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -70,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
     func buildMenu() {
         let menu = NSMenu()
-        let state = NSMenuItem(title: connected ? "小米云盘已连接" : "米盘正在连接", action: nil, keyEquivalent: ""); state.isEnabled = false; menu.addItem(state)
+        let state = NSMenuItem(title: "小米云盘 · \(connectionLabel)", action: nil, keyEquivalent: ""); state.isEnabled = false; menu.addItem(state)
         menu.addItem(NSMenuItem(title: "在 Finder 中打开", action: #selector(openFinder), keyEquivalent: "o"))
         menu.addItem(NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "弹出云盘", action: #selector(eject), keyEquivalent: ""))
@@ -111,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         request("status") { [weak self] result in guard let self = self else { return }; if case .success(let state) = result {
             self.connected = state["connected"] as? Bool ?? false
             self.autoMount = (state["config"] as? [String: Any])?["autoMount"] as? Bool ?? true
+            self.connectionLabel = ConnectionPresentation.label(connected: self.connected, checking: state["checking"] as? Bool ?? false, renewing: state["renewing"] as? Bool ?? false, keychainRequired: self.webSession.needsAuthorization, authRequired: state["authRequired"] as? Bool ?? false, hasSession: state["hasSession"] as? Bool ?? false)
             self.buildMenu()
             if self.connected && self.autoMount && !self.isMounted() && Date() > self.nextMountAttempt { self.mount(open: false) { _ in } }
             let renewing = state["renewing"] as? Bool ?? false
@@ -124,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         } }
     }
-    @objc func woke() { refreshPolicy.request(); nextMountAttempt = Date().addingTimeInterval(5); DispatchQueue.main.asyncAfter(deadline: .now()+6) { self.request("check", body: [:]) { _ in }; self.heartbeat() } }
+    @objc func woke() { nextMountAttempt = Date().addingTimeInterval(5); DispatchQueue.main.asyncAfter(deadline: .now()+6) { self.request("check", body: [:]) { _ in }; self.heartbeat() } }
     func isMounted() -> Bool {
         var pointer: UnsafeMutablePointer<statfs>?; let count = getmntinfo(&pointer, MNT_NOWAIT)
         guard let first = pointer, count > 0 else { return false }
@@ -182,7 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             guard cookies.contains(where: { $0["Name"] as? String == "serviceToken" }) else { self.refreshPolicy.request(); self.refreshLogin(); return }
             self.request("session", body: ["cookies": cookies, "background": true]) { result in
                 switch result {
-                case .success: self.heartbeat(); self.model.refresh()
+                case .success: self.refreshPolicy.finish(result: .connected); self.heartbeat(); self.model.refresh()
                 case .failure: self.refreshPolicy.request(); self.refreshLogin()
                 }
             }

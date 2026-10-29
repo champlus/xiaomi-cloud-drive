@@ -6,9 +6,9 @@
 <key>CFBundleDisplayName</key><string>米盘</string>
 <key>CFBundleExecutable</key><string>米盘</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>0.1.1</string>
-<key>CFBundleIconFile</key><string>MiCloudIcon</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>0.1.2</string>
+<key>CFBundleIconFile</key><string>MiPanIcon</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>

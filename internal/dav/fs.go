@@ -27,6 +27,12 @@ type listFlight struct {
 	items []cloud.Entry
 	err   error
 }
+type refreshFailure struct {
+	err      error
+	until    time.Time
+	attempts int
+}
+
 type FS struct {
 	Backend  cloud.Backend
 	Root     string
@@ -36,12 +42,20 @@ type FS struct {
 	cache    map[string]cached
 	flight   map[string]*listFlight
 	epoch    uint64
+	failures map[string]refreshFailure
 }
 
 func New(backend cloud.Backend) *FS {
-	return &FS{Backend: backend, Root: "0", cache: map[string]cached{}, flight: map[string]*listFlight{}}
+	return &FS{Backend: backend, Root: "0", cache: map[string]cached{}, flight: map[string]*listFlight{}, failures: map[string]refreshFailure{}}
 }
-func (f *FS) Invalidate() { f.mu.Lock(); f.cache = map[string]cached{}; f.epoch++; f.mu.Unlock() }
+func (f *FS) Invalidate() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cache = map[string]cached{}
+	f.flight = map[string]*listFlight{}
+	f.failures = map[string]refreshFailure{}
+	f.epoch++
+}
 func (f *FS) List(ctx context.Context, id string) ([]cloud.Entry, error) {
 	f.mu.Lock()
 	c, ok := f.cache[id]
@@ -50,7 +64,7 @@ func (f *FS) List(ctx context.Context, id string) ([]cloud.Entry, error) {
 		return c.items, nil
 	}
 	if ok && time.Since(c.at) < 5*time.Minute {
-		if f.flight[id] == nil {
+		if f.flight[id] == nil && !time.Now().Before(f.failures[id].until) {
 			flight := &listFlight{done: make(chan struct{})}
 			f.flight[id] = flight
 			epoch := f.epoch
@@ -62,6 +76,10 @@ func (f *FS) List(ctx context.Context, id string) ([]cloud.Entry, error) {
 		}
 		f.mu.Unlock()
 		return c.items, nil
+	}
+	if failure := f.failures[id]; time.Now().Before(failure.until) {
+		f.mu.Unlock()
+		return nil, failure.err
 	}
 	if flight := f.flight[id]; flight != nil {
 		f.mu.Unlock()
@@ -85,8 +103,21 @@ func (f *FS) fetchList(ctx context.Context, id string, flight *listFlight, epoch
 	defer f.mu.Unlock()
 	flight.items = items
 	flight.err = err
-	if err == nil && epoch == f.epoch {
-		f.cache[id] = cached{items, time.Now()}
+	if epoch == f.epoch {
+		if err == nil {
+			f.cache[id] = cached{items, time.Now()}
+			delete(f.failures, id)
+		} else {
+			attempts := f.failures[id].attempts + 1
+			if attempts > 5 {
+				attempts = 5
+			}
+			delay := 5 * time.Second * time.Duration(1<<(attempts-1))
+			if delay > time.Minute {
+				delay = time.Minute
+			}
+			f.failures[id] = refreshFailure{err: err, until: time.Now().Add(delay), attempts: attempts}
+		}
 	}
 	if f.flight[id] == flight {
 		delete(f.flight, id)
@@ -98,6 +129,7 @@ func (f *FS) fetchList(ctx context.Context, id string, flight *listFlight, epoch
 // short delay between an operation response and its directory index updating.
 func (f *FS) Await(ctx context.Context, parent, id, name string, deleted bool) (cloud.Entry, error) {
 	deadline := time.Now().Add(5 * time.Second)
+	delay := 200 * time.Millisecond
 	for {
 		items, err := f.Backend.List(ctx, parent)
 		if err != nil {
@@ -122,7 +154,13 @@ func (f *FS) Await(ctx context.Context, parent, id, name string, deleted bool) (
 		select {
 		case <-ctx.Done():
 			return cloud.Entry{}, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(delay):
+		}
+		if delay < time.Second {
+			delay *= 2
+			if delay > time.Second {
+				delay = time.Second
+			}
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,8 @@ type Client struct {
 	sessionVersion   uint64
 	OnSessionChanged func()
 	RefreshSession   func(context.Context, uint64) error
+	cooldownUntil    time.Time
+	cooldownError    error
 }
 
 func New() *Client {
@@ -178,6 +181,11 @@ func (c *Client) callOnce(ctx context.Context, method, path string, v url.Values
 		return errors.New("小米接口地址无效")
 	}
 	c.mu.RLock()
+	if time.Now().Before(c.cooldownUntil) {
+		err := c.cooldownError
+		c.mu.RUnlock()
+		return err
+	}
 	client := *c.HTTP
 	jar := client.Jar
 	cookies := jar.Cookies(u)
@@ -239,6 +247,21 @@ func (c *Client) callOnce(ctx context.Context, method, path string, v url.Values
 		notify()
 	}
 	failure := &ResponseError{HTTPStatus: resp.StatusCode, Endpoint: path}
+	if resp.StatusCode == 403 || resp.StatusCode == 429 {
+		until := time.Now().Add(time.Minute)
+		if seconds, err := strconv.ParseInt(resp.Header.Get("Retry-After"), 10, 32); err == nil && seconds > 0 {
+			until = time.Now().Add(time.Duration(seconds) * time.Second)
+		} else if date, err := http.ParseTime(resp.Header.Get("Retry-After")); err == nil && date.After(time.Now()) {
+			until = date
+		}
+		c.mu.Lock()
+		if until.After(c.cooldownUntil) {
+			c.cooldownUntil = until
+			c.cooldownError = &ResponseError{HTTPStatus: resp.StatusCode, Endpoint: path}
+		}
+		c.mu.Unlock()
+	}
+
 	if resp.StatusCode == http.StatusUnauthorized {
 		failure.Auth = true
 		return failure

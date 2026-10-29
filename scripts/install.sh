@@ -29,4 +29,7 @@ if [ -d "$TARGET_APP" ]; then mv "$TARGET_APP" "$TASK_INSTALL_TEMP/previous.app"
 mv "$TASK_INSTALL_TEMP/米盘.app" "$TARGET_APP"
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$TARGET_APP/Contents/MacOS/mipan" "$HOME/.local/bin/mipan"
+# Register the replaced bundle and its content-versioned icon with Launch Services.
+touch "$TARGET_APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET_APP"
 if [ "$TASK_INSTALL_OPEN" = true ]; then open "$TARGET_APP"; fi

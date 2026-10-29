@@ -34,6 +34,14 @@ import Foundation
         let driveOnly = [WebSessionCookie(nested)]
         precondition(WebSessionCookie.merging(backup, with: driveOnly).count == 2, "a service-token refresh must retain account renewal credentials")
 
+        let statuses: [(Bool, Bool, Bool, Bool, Bool, Bool, String)] = [
+            (false,false,false,false,false,false,"未登录"), (false,false,false,false,true,true,"需要验证"),
+            (false,false,false,false,false,true,"连接中断"), (true,false,false,false,false,true,"已连接"),
+            (false,false,true,false,false,true,"恢复连接中"), (false,false,false,true,false,false,"需要恢复")]
+        for (connected,checking,renewing,keychain,auth,session,expected) in statuses {
+            precondition(ConnectionPresentation.label(connected: connected, checking: checking, renewing: renewing, keychainRequired: keychain, authRequired: auth, hasSession: session) == expected)
+        }
+
         var policy = LoginRefreshPolicy()
         precondition(policy.begin(at: now))
         precondition(!policy.begin(at: now.addingTimeInterval(1)), "only one renewal may run")

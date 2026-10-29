@@ -23,6 +23,7 @@ final class SettingsModel: ObservableObject {
     @Published var error = ""
     @Published var pending = 0
     @Published var activities: [Activity] = []
+    var connectionLabel: String { ConnectionPresentation.label(connected: connected, checking: checking, renewing: renewing, keychainRequired: keychainRequired, authRequired: authRequired, hasSession: hasSession) }
     init(app: AppDelegate) { self.app = app }
     func refresh() {
         guard let app = app else { return }
@@ -141,7 +142,7 @@ struct SettingsView: View {
                 SettingsRow(icon: "circle.dotted", title: "连接状态") {
                     HStack(spacing: 6) {
                         if model.checking || model.busy || model.renewing { ProgressView().controlSize(.mini) }
-                        Text(model.keychainRequired ? "需要授权" : model.renewing ? "恢复连接中" : model.checking ? "连接中" : model.connected ? "已连接" : model.authRequired ? "需要验证" : model.hasSession ? "连接中断" : "未登录")
+                        Text(model.connectionLabel)
                             .font(.system(size: 12)).foregroundStyle(model.connected ? Color.green : Color.secondary)
                         Button(action: model.check) { Image(systemName: "arrow.clockwise") }.buttonStyle(.borderless).help("检查连接")
                     }
@@ -153,7 +154,7 @@ struct SettingsView: View {
                 }
                 CardDivider()
                 SettingsRow(icon: "person.crop.circle", title: "小米账号") {
-                    if model.keychainRequired { Button("授权钥匙串", action: model.authorizeKeychain).buttonStyle(.borderedProminent) }
+                    if model.keychainRequired { Button("恢复登录", action: model.authorizeKeychain).buttonStyle(.borderedProminent) }
                     else if model.connected {
                         Button("重新登录", action: model.login)
                         Button("退出", action: model.logout)

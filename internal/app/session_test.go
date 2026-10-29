@@ -193,3 +193,12 @@ func TestNativeSessionOwnerDoesNotWriteServiceKeychain(t *testing.T) {
 		t.Fatal("background service accessed Keychain instead of leaving persistence to the native app")
 	}
 }
+
+func TestUnloadedNativeSessionIsNotReportedAsCloudExpiry(t *testing.T) {
+	s := testServer(t)
+	s.nativeSession = true
+	s.Check()
+	if s.authRequired || s.lastError != "" {
+		t.Fatal("an unloaded local session was incorrectly reported as Xiaomi rejecting authentication")
+	}
+}

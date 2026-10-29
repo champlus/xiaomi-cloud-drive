@@ -95,3 +95,14 @@ struct WebSessionArchive: Codable {
     let cookies: [WebSessionCookie]
     init(_ cookies: [WebSessionCookie]) { version = 2; self.cookies = cookies }
 }
+
+struct ConnectionPresentation {
+    static func label(connected: Bool, checking: Bool, renewing: Bool, keychainRequired: Bool, authRequired: Bool, hasSession: Bool) -> String {
+        if keychainRequired { return "需要恢复" }
+        if renewing { return "恢复连接中" }
+        if checking { return "连接中" }
+        if connected { return "已连接" }
+        if authRequired { return "需要验证" }
+        return hasSession ? "连接中断" : "未登录"
+    }
+}

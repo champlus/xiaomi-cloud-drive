@@ -28,8 +28,10 @@ def resolve_identity():
 
 def sign_app(app,identity):
     components=[(app/'Contents/MacOS/midrive-service','dev.cham.midrive.service'),(app/'Contents/MacOS/mipan','dev.cham.midrive.cli'),(app,'dev.cham.midrive')]
+    # The credential helper is already signed and must retain its exact CDHash.
+    subprocess.run(['codesign','--verify','--strict',str(app/'Contents/MacOS/credential-helper')],check=True)
     for target,identifier in components:
-        subprocess.run(['codesign','--force','--sign',identity,'--timestamp=none','--identifier',identifier,str(target)],check=True)
+        subprocess.run(['codesign','--force','--sign',identity,'--timestamp=none','--options','runtime','--identifier',identifier,str(target)],check=True)
     subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
 
 if __name__=='__main__':
